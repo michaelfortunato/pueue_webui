@@ -7,6 +7,9 @@ type ApiStatusResponse = {
   ok: boolean;
   status?: Record<string, unknown>;
   error?: string;
+  cached?: boolean;
+  stats?: Record<string, unknown>;
+  digest?: string;
 };
 
 type ApiLogResponse = {
@@ -18,12 +21,21 @@ type ApiLogResponse = {
 type TaskRow = {
   id: string;
   status: string;
+  statusTone: string;
   command: string;
   commandDisplay: string;
+  idLower: string;
+  commandLower: string;
+  groupLower: string;
+  filterKey: string;
+  groupColor: string;
   group?: string;
   path?: string;
   label?: string;
   priority?: number;
+  startDisplay?: string;
+  endDisplay?: string;
+  durationDisplay?: string;
   timing?: {
     state: "queued" | "running" | "paused" | "done" | "unknown";
     start?: string;
@@ -46,17 +58,53 @@ function statusLabel(status: unknown): string {
   return "unknown";
 }
 
-function normalizeTasks(status?: Record<string, unknown>): TaskRow[] {
+type TaskCacheEntry = { signature: string; row: TaskRow };
+
+function taskSignature(id: string, task: any): string {
+  const status = statusLabel(task?.status);
+  const group = typeof task?.group === "string" ? task.group : "default";
+  const command =
+    typeof task?.command === "string"
+      ? task.command
+      : Array.isArray(task?.command)
+        ? task.command.join(" ")
+        : "";
+  const path = typeof task?.path === "string" ? task.path : "";
+  const label = typeof task?.label === "string" ? task.label : "";
+  const priority = typeof task?.priority === "number" ? task.priority : "";
+  let detail = "";
+  if (task?.status && typeof task.status === "object") {
+    const key = Object.keys(task.status)[0];
+    const info = (task.status[key] ?? {}) as Record<string, unknown>;
+    const result = parseResult(info.result);
+    detail = `${key ?? ""}|${info.start ?? ""}|${info.end ?? ""}|${info.enqueued_at ?? ""}|${result ?? ""}`;
+  }
+  return `${id}|${status}|${group}|${command}|${path}|${label}|${priority}|${detail}`;
+}
+
+function normalizeTasks(
+  status: Record<string, unknown> | undefined,
+  cache: Map<string, TaskCacheEntry>
+): { rows: TaskRow[]; cache: Map<string, TaskCacheEntry> } {
   if (!status || typeof status !== "object") {
-    return [];
+    return { rows: [], cache: new Map() };
   }
 
   const tasks = (status as { tasks?: Record<string, any> }).tasks;
   if (!tasks || typeof tasks !== "object") {
-    return [];
+    return { rows: [], cache: new Map() };
   }
 
-  return Object.entries(tasks).map(([id, task]) => {
+  const nextCache = new Map<string, TaskCacheEntry>();
+  const rows: TaskRow[] = [];
+  for (const [id, task] of Object.entries(tasks)) {
+    const signature = taskSignature(id, task);
+    const prev = cache.get(id);
+    if (prev && prev.signature === signature) {
+      rows.push(prev.row);
+      nextCache.set(id, prev);
+      continue;
+    }
     const command =
       typeof task?.command === "string"
         ? task.command
@@ -64,20 +112,75 @@ function normalizeTasks(status?: Record<string, unknown>): TaskRow[] {
           ? task.command.join(" ")
           : "";
     const commandDisplay = command.replace(/(--\S+)/g, "$1\u200b");
-
+    const group = typeof task?.group === "string" ? task.group : undefined;
     const timing = extractTiming(task?.status);
-    return {
+    const baseStatus = statusLabel(task?.status);
+    let statusLabelText = baseStatus;
+    if (timing?.state === "done") {
+      if (timing.result === "Success") {
+        statusLabelText = "Done";
+      } else if (timing.result) {
+        statusLabelText = timing.result;
+      } else {
+        statusLabelText = "Failed";
+      }
+    }
+    const statusLower = statusLabelText.toLowerCase();
+    const tone = statusTone(statusLabelText);
+    let filterKey: string;
+    if (timing?.state) {
+      if (timing.state === "done") {
+        filterKey = timing.result === "Success" ? "done" : "failed";
+      } else {
+        filterKey = timing.state;
+      }
+    } else if (statusLower.includes("running")) {
+      filterKey = "running";
+    } else if (statusLower.includes("queued")) {
+      filterKey = "queued";
+    } else if (statusLower.includes("paused")) {
+      filterKey = "paused";
+    } else if (["failed", "killed", "panic"].some((key) => statusLower.includes(key))) {
+      filterKey = "failed";
+    } else if (["done", "success"].some((key) => statusLower.includes(key))) {
+      filterKey = "done";
+    } else {
+      filterKey = "unknown";
+    }
+    const idLower = id.toLowerCase();
+    const commandLower = command.toLowerCase();
+    const groupLower = (group ?? "default").toLowerCase();
+    const color = groupColor(group);
+    const startDisplay = timing?.start ? formatTimestamp(timing.start) : undefined;
+    const endDisplay = timing?.end ? formatTimestamp(timing.end) : undefined;
+    const durationDisplay =
+      timing?.state === "done" ? formatDuration(durationMs(timing.start, timing.end)) : undefined;
+    const row: TaskRow = {
       id,
-      status: statusLabel(task?.status),
+      status: statusLabelText,
+      statusTone: tone,
       command,
       commandDisplay,
-      group: task?.group,
+      idLower,
+      commandLower,
+      groupLower,
+      filterKey,
+      groupColor: color,
+      group,
       path: task?.path,
       label: typeof task?.label === "string" ? task.label : undefined,
       priority: typeof task?.priority === "number" ? task.priority : undefined,
+      startDisplay,
+      endDisplay,
+      durationDisplay,
       timing,
     };
-  });
+    const entry = { signature, row };
+    nextCache.set(id, entry);
+    rows.push(row);
+  }
+  rows.sort((a, b) => Number(a.id) - Number(b.id));
+  return { rows, cache: nextCache };
 }
 
 function statusTone(status: string) {
@@ -107,6 +210,7 @@ function extractTiming(status: unknown): TaskRow["timing"] {
     return { state: "unknown" };
   }
   const detail = (record[key] ?? {}) as Record<string, unknown>;
+  const result = parseResult(detail.result);
   if (key === "Queued") {
     return { state: "queued", enqueuedAt: detail.enqueued_at as string | undefined };
   }
@@ -130,10 +234,19 @@ function extractTiming(status: unknown): TaskRow["timing"] {
       start: detail.start as string | undefined,
       end: detail.end as string | undefined,
       enqueuedAt: detail.enqueued_at as string | undefined,
-      result: typeof detail.result === "string" ? detail.result : undefined,
+      result,
     };
   }
   return { state: "unknown" };
+}
+
+function parseResult(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>);
+    if (keys.length > 0) return keys[0];
+  }
+  return undefined;
 }
 
 function durationMs(start?: string, end?: string) {
@@ -161,21 +274,10 @@ function formatTimestamp(value?: string) {
   return new Date(parsed).toLocaleString();
 }
 
-function taskFilterKey(task: TaskRow) {
-  const timing = task.timing;
-  if (!timing) return "unknown";
-  if (timing.state === "done") {
-    return timing.result === "Success" ? "done" : "failed";
-  }
-  return timing.state;
-}
-
 function isFailedTask(task: TaskRow) {
-  const timing = task.timing;
-  if (timing?.state === "done") {
-    return timing.result !== "Success";
-  }
-  return task.status.toLowerCase().includes("failed");
+  if (task.filterKey === "failed") return true;
+  if (task.filterKey === "done") return false;
+  return task.statusTone === "danger";
 }
 
 function canShowLogs(task: TaskRow) {
@@ -190,9 +292,25 @@ function statusDigest(status?: Record<string, unknown>) {
   let count = 0;
   for (const id in tasks) {
     const task = tasks[id];
-    const label = statusLabel(task?.status);
+    const state = statusLabel(task?.status);
     const group = task?.group ?? "default";
-    const chunk = `${id}|${label}|${group}|${task?.label ?? ""}|${task?.priority ?? ""}`;
+    const command =
+      typeof task?.command === "string"
+        ? task.command
+        : Array.isArray(task?.command)
+          ? task.command.join(" ")
+          : "";
+    const path = task?.path ?? "";
+    const label = task?.label ?? "";
+    const priority = task?.priority ?? "";
+    let detail = "";
+    if (task?.status && typeof task.status === "object") {
+      const key = Object.keys(task.status)[0];
+      const info = (task.status[key] ?? {}) as Record<string, unknown>;
+      const result = parseResult(info.result);
+      detail = `${key ?? ""}|${info.start ?? ""}|${info.end ?? ""}|${info.enqueued_at ?? ""}|${result ?? ""}`;
+    }
+    const chunk = `${id}|${state}|${group}|${label}|${priority}|${command}|${path}|${detail}`;
     for (let i = 0; i < chunk.length; i += 1) {
       hash = (hash * 33) ^ chunk.charCodeAt(i);
     }
@@ -272,7 +390,7 @@ const TaskRowView = memo(
           <span
             className="group-pill"
             title={task.group ?? "default"}
-            style={{ "--group-color": groupColor(task.group) } as React.CSSProperties}
+            style={{ "--group-color": task.groupColor } as React.CSSProperties}
           >
             {task.group ?? "default"}
           </span>
@@ -288,12 +406,10 @@ const TaskRowView = memo(
           </button>
         </div>
         <div className="cell status">
-          <span className={`status-pill ${statusTone(task.status)}`}>{task.status}</span>
-          {task.timing?.start && <div className="status-meta">Started {formatTimestamp(task.timing.start)}</div>}
-          {task.timing?.end && <div className="status-meta">Ended {formatTimestamp(task.timing.end)}</div>}
-          {task.timing?.state === "done" && (
-            <div className="status-meta">Duration {formatDuration(durationMs(task.timing.start, task.timing.end))}</div>
-          )}
+          <span className={`status-pill ${task.statusTone}`}>{task.status}</span>
+          {task.startDisplay && <div className="status-meta">Started {task.startDisplay}</div>}
+          {task.endDisplay && <div className="status-meta">Ended {task.endDisplay}</div>}
+          {task.durationDisplay && <div className="status-meta">Duration {task.durationDisplay}</div>}
         </div>
         <div className="cell command">
           <div className="command-block">
@@ -362,22 +478,33 @@ const TaskRowView = memo(
                   </button>
                 );
               })}
-              <button className="action" onClick={() => onSelectRow(task.id)}>
-                Details
-              </button>
             </div>
           )}
         </div>
       </div>
     );
   },
-  (prev, next) =>
-    prev.task === next.task &&
-    prev.isSelected === next.isSelected &&
-    prev.isActive === next.isActive &&
-    prev.isMenuOpen === next.isMenuOpen &&
-    prev.isCopied === next.isCopied &&
-    prev.pendingActions === next.pendingActions
+  (prev, next) => {
+    if (prev.task !== next.task) return false;
+    if (prev.isSelected !== next.isSelected) return false;
+    if (prev.isActive !== next.isActive) return false;
+    if (prev.isMenuOpen !== next.isMenuOpen) return false;
+    if (prev.isCopied !== next.isCopied) return false;
+    if (prev.pendingActions.size !== next.pendingActions.size) return false;
+    for (const action of prev.pendingActions) {
+      if (!next.pendingActions.has(action)) return false;
+    }
+    return (
+      prev.actionDefs === next.actionDefs &&
+      prev.onToggleSelect === next.onToggleSelect &&
+      prev.onOpenLog === next.onOpenLog &&
+      prev.onToggleMenu === next.onToggleMenu &&
+      prev.onRunAction === next.onRunAction &&
+      prev.onSelectRow === next.onSelectRow &&
+      prev.onOpenTask === next.onOpenTask &&
+      prev.onCopyCommand === next.onCopyCommand
+    );
+  }
 );
 
 
@@ -417,6 +544,13 @@ export default function Page() {
   const [logData, setLogData] = useState<ApiLogResponse | null>(null);
   const [useLocalTime, setUseLocalTime] = useState(true);
   const [quickFilters, setQuickFilters] = useState<Set<string>>(new Set());
+  const [callbackCommand, setCallbackCommand] = useState("");
+  const [callbackLines, setCallbackLines] = useState("");
+  const [callbackLoading, setCallbackLoading] = useState(true);
+  const [callbackSaving, setCallbackSaving] = useState(false);
+  const [callbackError, setCallbackError] = useState<string | null>(null);
+  const [callbackInfo, setCallbackInfo] = useState<string | null>(null);
+  const [callbackPath, setCallbackPath] = useState<string | null>(null);
   const [addCommand, setAddCommand] = useState("");
   const [addGroup, setAddGroup] = useState("default");
   const [addPriority, setAddPriority] = useState("");
@@ -424,7 +558,7 @@ export default function Page() {
   const [addStashed, setAddStashed] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
-  const [isPending, startTransition] = useTransition();
+  const [, startTransition] = useTransition();
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [groupName, setGroupName] = useState("");
   const [groupParallel, setGroupParallel] = useState("");
@@ -443,6 +577,7 @@ export default function Page() {
   const loadInFlightRef = useRef(false);
   const [isVisible, setIsVisible] = useState(true);
   const lastDigestRef = useRef<string | null>(null);
+  const taskCacheRef = useRef<Map<string, TaskCacheEntry>>(new Map());
 
   const openLogModal = useCallback(() => {
     setIsLogModalOpen(true);
@@ -463,18 +598,32 @@ export default function Page() {
       const res = await fetch("/api/status", { cache: "no-store" });
       const json = (await res.json()) as ApiStatusResponse;
       if (json.ok) {
-        const nextDigest = statusDigest(json.status);
-        if (nextDigest === lastDigestRef.current) {
+        if (json.digest && json.digest === lastDigestRef.current) {
           setLoading(false);
           return;
         }
-        lastDigestRef.current = nextDigest;
+        if (json.cached && lastDigestRef.current) {
+          setLoading(false);
+          return;
+        }
+        if (json.digest) {
+          lastDigestRef.current = json.digest;
+        } else {
+          const nextDigest = statusDigest(json.status);
+          if (nextDigest === lastDigestRef.current) {
+            setLoading(false);
+            return;
+          }
+          lastDigestRef.current = nextDigest;
+        }
       } else {
         lastDigestRef.current = null;
       }
-      setData(json);
+      startTransition(() => setData(json));
     } catch (error) {
-      setData({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
+      startTransition(() =>
+        setData({ ok: false, error: error instanceof Error ? error.message : "Unknown error" })
+      );
     } finally {
       loadInFlightRef.current = false;
       setLoading(false);
@@ -504,7 +653,55 @@ export default function Page() {
     return () => document.removeEventListener("visibilitychange", handler);
   }, []);
 
-  const tasks = useMemo(() => normalizeTasks(data.status), [data.status]);
+  useEffect(() => {
+    let active = true;
+    setCallbackLoading(true);
+    setCallbackError(null);
+    const schedule =
+      typeof window !== "undefined" && "requestIdleCallback" in window
+        ? (cb: () => void) => (window as any).requestIdleCallback(cb)
+        : (cb: () => void) => window.setTimeout(cb, 0);
+    const cancel =
+      typeof window !== "undefined" && "cancelIdleCallback" in window
+        ? (id: number) => (window as any).cancelIdleCallback(id)
+        : (id: number) => window.clearTimeout(id);
+    const handle = schedule(() => {
+      fetch("/api/config/callback", { cache: "no-store" })
+        .then((res) => res.json())
+        .then((json) => {
+          if (!active) return;
+          if (!json?.ok) {
+            setCallbackError(json?.error ?? "Failed to load callback config.");
+            setCallbackLoading(false);
+            return;
+          }
+          const config = json.config ?? {};
+          setCallbackCommand(typeof config.callback === "string" ? config.callback : "");
+          setCallbackLines(
+            typeof config.callback_log_lines === "number"
+              ? String(config.callback_log_lines)
+              : ""
+          );
+          setCallbackPath(typeof config.config_path === "string" ? config.config_path : null);
+          setCallbackLoading(false);
+        })
+        .catch((error) => {
+          if (!active) return;
+          setCallbackError(error instanceof Error ? error.message : "Failed to load callback config.");
+          setCallbackLoading(false);
+        });
+    });
+    return () => {
+      active = false;
+      cancel(handle as number);
+    };
+  }, []);
+
+  const tasks = useMemo(() => {
+    const { rows, cache } = normalizeTasks(data.status, taskCacheRef.current);
+    taskCacheRef.current = cache;
+    return rows;
+  }, [data.status]);
   const deferredSearch = useDeferredValue(search);
   const deferredStatus = useDeferredValue(statusFilter);
   const deferredGroupFilters = useDeferredValue(groupFilters);
@@ -531,42 +728,53 @@ export default function Page() {
   }, [tasks]);
   const groupOptions = useMemo(() => groupNames, [groupNames]);
 
-  const counts = useMemo(() => {
-    const total = tasks.length;
-    const running = tasks.filter((task) => task.timing?.state === "running").length;
-    const queued = tasks.filter((task) => task.timing?.state === "queued").length;
-    const completed = tasks.filter((task) => task.timing?.state === "done").length;
-    const failed = tasks.filter((task) => isFailedTask(task)).length;
-    return { total, running, queued, completed, failed };
-  }, [tasks]);
-
-  const failedIds = useMemo(() => {
-    const ids = tasks.filter((task) => isFailedTask(task)).map((task) => task.id);
-    return ids.sort((a, b) => Number(a) - Number(b));
-  }, [tasks]);
-
   const groupStats = useMemo(() => {
-    const statsFromServer = data.status && "stats" in data && (data as any).stats;
-    if (statsFromServer && statsFromServer.groups && typeof statsFromServer.groups === "object") {
-      const entries = Object.entries(statsFromServer.groups as Record<string, any>).map(([group, entry]) => {
-        const avgDuration = formatDuration(entry.avg_ms ?? undefined);
-        const stddevDuration = formatDuration(entry.stddev_ms ?? undefined);
-        return {
+    const statsFromServer = data.stats;
+    const statusGroups = (data.status as { groups?: Record<string, any> } | undefined)?.groups ?? {};
+    if (statsFromServer && typeof statsFromServer === "object" && "groups" in statsFromServer) {
+      const entries = Object.entries((statsFromServer as any).groups as Record<string, any>).map(
+        ([group, entry]) => {
+          const avgDuration = formatDuration(entry.avg_ms ?? undefined);
+          const stddevDuration = formatDuration(entry.stddev_ms ?? undefined);
+          return {
+            group,
+            total: entry.total ?? 0,
+            running: entry.running ?? 0,
+            queued: entry.queued ?? 0,
+            paused: entry.paused ?? 0,
+            done: entry.done ?? 0,
+            success: entry.success ?? 0,
+            failed: entry.failed ?? 0,
+            durations: [],
+            failedIds: Array.isArray(entry.failed_ids) ? entry.failed_ids.map(String) : [],
+            avgDuration,
+            stddevDuration,
+            parallel: typeof entry.parallel === "number" ? entry.parallel : null,
+          };
+        }
+      );
+      const merged = new Map<string, (typeof entries)[number]>();
+      entries.forEach((entry) => merged.set(entry.group, entry));
+      groupNames.forEach((group) => {
+        if (merged.has(group)) return;
+        const statusGroup = statusGroups[group];
+        merged.set(group, {
           group,
-          total: entry.total ?? 0,
-          running: entry.running ?? 0,
-          queued: entry.queued ?? 0,
-          paused: entry.paused ?? 0,
-          done: entry.done ?? 0,
-          success: entry.success ?? 0,
-          failed: entry.failed ?? 0,
+          total: 0,
+          running: 0,
+          queued: 0,
+          paused: 0,
+          done: 0,
+          success: 0,
+          failed: 0,
           durations: [],
-          failedIds: Array.isArray(entry.failed_ids) ? entry.failed_ids.map(String) : [],
-          avgDuration,
-          stddevDuration,
-        };
+          failedIds: [],
+          avgDuration: "—",
+          stddevDuration: "—",
+          parallel: typeof statusGroup?.parallel_tasks === "number" ? statusGroup.parallel_tasks : null,
+        });
       });
-      return entries.sort((a, b) => {
+      return Array.from(merged.values()).sort((a, b) => {
         if (a.group === "default") return -1;
         if (b.group === "default") return 1;
         return a.group.localeCompare(b.group);
@@ -584,6 +792,7 @@ export default function Page() {
         failed: number;
         durations: number[];
         failedIds: string[];
+        parallel?: number | null;
       }
     >();
 
@@ -598,6 +807,10 @@ export default function Page() {
         failed: 0,
         durations: [],
         failedIds: [],
+        parallel:
+          typeof (statusGroups as Record<string, any>)[group]?.parallel_tasks === "number"
+            ? (statusGroups as Record<string, any>)[group].parallel_tasks
+            : null,
       });
     });
 
@@ -660,7 +873,7 @@ export default function Page() {
         if (b.group === "default") return 1;
         return a.group.localeCompare(b.group);
       });
-  }, [tasks, groupNames, data]);
+  }, [tasks, groupNames, data.stats, data.status]);
 
   useEffect(() => {
     const timer = setTimeout(() => setSearch(searchInput), 200);
@@ -673,23 +886,25 @@ export default function Page() {
       const group = task.group ?? "default";
       const matchesSearch =
         query.length === 0 ||
-        task.id.toLowerCase().includes(query) ||
-        task.command.toLowerCase().includes(query) ||
-        group.toLowerCase().includes(query);
+        task.idLower.includes(query) ||
+        task.commandLower.includes(query) ||
+        task.groupLower.includes(query);
       const matchesStatus = deferredStatus === "all" || task.status === deferredStatus;
       const matchesGroup = deferredGroupFilters.size === 0 || deferredGroupFilters.has(group);
       const matchesQuick =
-        deferredQuickFilters.size === 0 || deferredQuickFilters.has(taskFilterKey(task));
+        deferredQuickFilters.size === 0 || deferredQuickFilters.has(task.filterKey);
       return matchesSearch && matchesStatus && matchesGroup && matchesQuick;
     });
 
-    const sorted = [...filtered];
     const [sortKey, sortDir] = deferredSort.split("-");
+    if (sortKey === "id") {
+      if (sortDir === "asc") return filtered;
+      return [...filtered].reverse();
+    }
+    const sorted = [...filtered];
     sorted.sort((a, b) => {
       let value = 0;
-      if (sortKey === "id") {
-        value = Number(a.id) - Number(b.id);
-      } else if (sortKey === "status") {
+      if (sortKey === "status") {
         value = a.status.localeCompare(b.status);
       } else if (sortKey === "command") {
         value = a.command.localeCompare(b.command);
@@ -700,6 +915,30 @@ export default function Page() {
     });
     return sorted;
   }, [tasks, deferredSearch, deferredStatus, deferredGroupFilters, deferredSort, deferredQuickFilters]);
+
+  const { counts, failedIds } = useMemo(() => {
+    const total = filteredTasks.length;
+    let running = 0;
+    let queued = 0;
+    let completed = 0;
+    let failed = 0;
+    const ids: string[] = [];
+    filteredTasks.forEach((task) => {
+      const key = task.filterKey;
+      if (key === "running") running += 1;
+      if (key === "queued") queued += 1;
+      if (key === "done" || key === "failed") completed += 1;
+      if (isFailedTask(task)) {
+        failed += 1;
+        ids.push(task.id);
+      }
+    });
+    ids.sort((a, b) => Number(a) - Number(b));
+    return {
+      counts: { total, running, queued, completed, failed },
+      failedIds: ids,
+    };
+  }, [filteredTasks]);
 
   const maxRows = 500;
   const autoLimited = filteredTasks.length > maxRows ? filteredTasks.slice(0, maxRows) : filteredTasks;
@@ -743,37 +982,37 @@ export default function Page() {
     []
   );
 
-  const selectedTask = useMemo(
-    () => tasks.find((task) => task.id === selectedTaskId) ?? null,
-    [tasks, selectedTaskId]
-  );
-
-  const selectedDuration = useMemo(() => {
-    if (!selectedTask?.timing) return "—";
-    if (selectedTask.timing.state !== "done") return "—";
-    return formatDuration(durationMs(selectedTask.timing.start, selectedTask.timing.end));
-  }, [selectedTask]);
-
-  function toggleSelectAll() {
+  const toggleSelectAll = useCallback(() => {
     if (allSelected) {
       startTransition(() => setSelectedIds(new Set()));
       return;
     }
-    const next = new Set(selectedIds);
-    displayedTasks.forEach((task) => next.add(task.id));
-    startTransition(() => setSelectedIds(next));
+    startTransition(() =>
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        displayedTasks.forEach((task) => next.add(task.id));
+        return next;
+      })
+    );
     setSelectedTaskId(null);
-  }
+  }, [allSelected, displayedTasks, startTransition]);
 
-  function toggleSelect(id: string) {
-    const next = new Set(selectedIds);
-    if (next.has(id)) {
-      next.delete(id);
-    } else {
-      next.add(id);
-    }
-    startTransition(() => setSelectedIds(next));
-  }
+  const toggleSelect = useCallback(
+    (id: string) => {
+      startTransition(() =>
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(id)) {
+            next.delete(id);
+          } else {
+            next.add(id);
+          }
+          return next;
+        })
+      );
+    },
+    [startTransition]
+  );
 
   useEffect(() => {
     if (renderMode !== "paginate") {
@@ -783,7 +1022,7 @@ export default function Page() {
     setPageIndex((prev) => Math.min(prev, Math.max(0, pageCount - 1)));
   }, [renderMode, pageCount]);
 
-  async function runTaskAction(id: string, action: string) {
+  const runTaskAction = useCallback(async (id: string, action: string) => {
     const key = `${id}:${action}`;
     setPendingActions((prev) => new Set(prev).add(key));
     try {
@@ -799,14 +1038,121 @@ export default function Page() {
         return next;
       });
     }
-  }
+  }, []);
 
-  async function runBatchAction(action: string) {
-    const ids = Array.from(selectedIds);
-    for (const id of ids) {
-      await runTaskAction(id, action);
+  const runBatchAction = useCallback(
+    async (action: string) => {
+      const ids = Array.from(selectedIds);
+      for (const id of ids) {
+        await runTaskAction(id, action);
+      }
+    },
+    [selectedIds, runTaskAction]
+  );
+
+  const loadLogs = useCallback(
+    async (targetId?: string) => {
+      const id = targetId ?? logTaskId;
+      if (!id) return;
+      const parsed = Number(logLines);
+      const lines = Number.isFinite(parsed) && parsed > 0 ? parsed : 200;
+      const query = `?lines=${lines}`;
+      const res = await fetch(`/api/logs/${id}${query}`, { cache: "no-store" });
+      const json = (await res.json()) as ApiLogResponse;
+      setLogData(json);
+    },
+    [logLines, logTaskId]
+  );
+
+  useEffect(() => {
+    if (!logTaskId) {
+      setLogData(null);
+      return;
     }
-  }
+    const timer = setTimeout(() => {
+      void loadLogs();
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [logTaskId, logLines, loadLogs]);
+
+  const saveCallback = useCallback(async () => {
+    setCallbackError(null);
+    setCallbackInfo(null);
+    setCallbackSaving(true);
+    const trimmed = callbackCommand.trim();
+    const linesText = callbackLines.trim();
+    const body: { callback?: string; callback_log_lines?: number } = { callback: trimmed };
+    if (linesText.length > 0) {
+      const parsed = Number(linesText);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        setCallbackError("Callback log lines must be a positive number.");
+        setCallbackSaving(false);
+        return;
+      }
+      body.callback_log_lines = Math.round(parsed);
+    }
+    try {
+      const res = await fetch("/api/config/callback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json?.ok) {
+        setCallbackError(json?.error ?? "Failed to save callback config.");
+        return;
+      }
+      const config = json.config ?? {};
+      setCallbackCommand(typeof config.callback === "string" ? config.callback : "");
+      setCallbackLines(
+        typeof config.callback_log_lines === "number"
+          ? String(config.callback_log_lines)
+          : ""
+      );
+      setCallbackPath(typeof config.config_path === "string" ? config.config_path : callbackPath);
+      setCallbackInfo("Callback config saved.");
+    } catch (error) {
+      setCallbackError(error instanceof Error ? error.message : "Failed to save callback config.");
+    } finally {
+      setCallbackSaving(false);
+    }
+  }, [callbackCommand, callbackLines, callbackPath]);
+
+  const handleOpenLog = useCallback(
+    (id: string) => {
+      setLogTaskId(id);
+      void loadLogs(id);
+      openLogModal();
+    },
+    [loadLogs, openLogModal]
+  );
+
+  const handleToggleMenu = useCallback((id: string) => {
+    setOpenActionRowId((prev) => (prev === id ? null : id));
+  }, []);
+
+  const handleSelectRow = useCallback((id: string) => {
+    setSelectedTaskId(id);
+  }, []);
+
+  const handleOpenTask = useCallback(
+    (id: string) => {
+      router.push(`/task/${id}`);
+    },
+    [router]
+  );
+
+  const handleCopyCommand = useCallback((id: string) => {
+    setCopiedTaskId(id);
+    setTimeout(() => setCopiedTaskId((prev) => (prev === id ? null : prev)), 1200);
+  }, []);
+
+  const handleRunAction = useCallback(
+    (id: string, action: string) => {
+      void runTaskAction(id, action);
+    },
+    [runTaskAction]
+  );
 
   async function addTask() {
     setAddError(null);
@@ -916,27 +1262,44 @@ export default function Page() {
     };
   }, [parsedLogLines]);
 
-  async function loadLogs(targetId?: string) {
-    const id = targetId ?? logTaskId;
-    if (!id) return;
-    const parsed = Number(logLines);
-    const lines = Number.isFinite(parsed) && parsed > 0 ? parsed : 200;
-    const query = `?lines=${lines}`;
-    const res = await fetch(`/api/logs/${id}${query}`, { cache: "no-store" });
-    const json = (await res.json()) as ApiLogResponse;
-    setLogData(json);
-  }
-
-  useEffect(() => {
-    if (!logTaskId) {
-      setLogData(null);
-      return;
-    }
-    const timer = setTimeout(() => {
-      void loadLogs();
-    }, 200);
-    return () => clearTimeout(timer);
-  }, [logTaskId, logLines]);
+  const taskRows = useMemo(
+    () =>
+      displayedTasks.map((task) => (
+        <TaskRowView
+          key={task.id}
+          task={task}
+          isSelected={selectedIds.has(task.id)}
+          isActive={selectedTaskId === task.id}
+          isMenuOpen={openActionRowId === task.id}
+          isCopied={copiedTaskId === task.id}
+          pendingActions={pendingById.get(task.id) ?? EMPTY_PENDING}
+          actionDefs={actionDefs}
+          onToggleSelect={toggleSelect}
+          onOpenLog={handleOpenLog}
+          onToggleMenu={handleToggleMenu}
+          onRunAction={handleRunAction}
+          onSelectRow={handleSelectRow}
+          onOpenTask={handleOpenTask}
+          onCopyCommand={handleCopyCommand}
+        />
+      )),
+    [
+      actionDefs,
+      copiedTaskId,
+      displayedTasks,
+      handleCopyCommand,
+      handleOpenLog,
+      handleOpenTask,
+      handleRunAction,
+      handleSelectRow,
+      handleToggleMenu,
+      openActionRowId,
+      pendingById,
+      selectedIds,
+      selectedTaskId,
+      toggleSelect,
+    ]
+  );
 
   return (
     <main>
@@ -1014,6 +1377,179 @@ export default function Page() {
         </div>
       </header>
 
+      <section className="section-block">
+        <div className="section-head">
+          <h2 className="section-title">Groups</h2>
+          <p className="section-note">Default stays pinned first. Click a chip to filter the task list.</p>
+        </div>
+        <div className="group-actions">
+          <button className="action primary" onClick={() => setShowAddGroupRow((prev) => !prev)}>
+            {showAddGroupRow ? "Hide add group" : "Add group"}
+          </button>
+        </div>
+        <div className="group-chips">
+          <button
+            className={`chip ${groupFilters.size === 0 ? "active" : ""}`}
+            onClick={() => startTransition(() => setGroupFilters(new Set()))}
+            style={{ "--group-color": groupColor("default") } as React.CSSProperties}
+          >
+            All groups
+          </button>
+          {groupStats.map((group) => {
+            const active = groupFilters.size === 0 || groupFilters.has(group.group);
+            return (
+            <button
+              className={`chip ${active ? "active" : "inactive"}`}
+              key={group.group}
+              onClick={() =>
+                startTransition(() =>
+                  setGroupFilters((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(group.group)) {
+                      next.delete(group.group);
+                    } else {
+                      next.add(group.group);
+                    }
+                    return next;
+                  })
+                )
+              }
+              title={`${group.group} (${group.total})`}
+              style={{ "--group-color": groupColor(group.group) } as React.CSSProperties}
+            >
+              <span className="chip-label">{group.group}</span>
+              <span className="chip-count">{group.total}</span>
+            </button>
+          )})}
+        </div>
+        <div className="stats-table">
+          <div className="stats-header">
+            <div>Group</div>
+            <div>Total</div>
+            <div>Running</div>
+            <div>Queued</div>
+            <div>Paused</div>
+            <div>Done</div>
+            <div>Success</div>
+            <div>Failed</div>
+            <div>Avg duration</div>
+            <div></div>
+            <div></div>
+          </div>
+          {groupStats.map((group) => (
+            <div className="stats-row" key={group.group}>
+              <div className="truncate" title={group.group}>
+                <span className="group-pill" style={{ "--group-color": groupColor(group.group) } as React.CSSProperties}>
+                  {group.group}
+                </span>
+              </div>
+              <div>{group.total}</div>
+              <div>{group.running}</div>
+              <div>{group.queued}</div>
+              <div>{group.paused}</div>
+              <div>{group.done}</div>
+              <div>{group.success}</div>
+              <div>
+                {group.failed > 0 ? (
+                  <span className="tooltip-anchor" role="button" tabIndex={0}>
+                    <span className="failed-count">{group.failed}</span>
+                    <span className="tooltip">
+                      <strong>Failed task IDs</strong>
+                      <div className="tooltip-list">
+                        {group.failedIds.slice(0, 4).map((id) => (
+                          <span className="tooltip-item" key={id}>
+                            {id}
+                          </span>
+                        ))}
+                        {group.failedIds.length > 4 && <span className="tooltip-item">…</span>}
+                      </div>
+                    </span>
+                  </span>
+                ) : (
+                  group.failed
+                )}
+              </div>
+              <div>
+                {group.avgDuration} ± {group.stddevDuration}
+              </div>
+              <div>
+                <span className="group-parallel-pill">
+                  {group.parallel ?? "—"} procs
+                </span>
+              </div>
+              <div className="group-row-action">
+                {group.group !== "default" && (
+                  <button
+                    className="icon-button"
+                    title={`Remove group ${group.group}`}
+                    onClick={() => {
+                      if (!window.confirm(`Remove group "${group.group}"?`)) return;
+                      setGroupError(null);
+                      const name = group.group;
+                      void (async () => {
+                        const body = { action: "remove", name };
+                        const res = await fetch("/api/groups", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify(body),
+                        });
+                        const json = (await res.json()) as { ok?: boolean; error?: string } | undefined;
+                        if (!json?.ok) {
+                          setGroupError(json?.error ?? "Failed to remove group.");
+                          return;
+                        }
+                        await load();
+                      })();
+                    }}
+                  >
+                    🗑
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+          {groupStats.length === 0 && (
+            <div className="stats-row">
+              <div>default</div>
+              <div>0</div>
+              <div>0</div>
+              <div>0</div>
+              <div>0</div>
+              <div>0</div>
+              <div>0</div>
+              <div>0</div>
+              <div>—</div>
+              <div>
+                <span className="group-parallel-pill">— procs</span>
+              </div>
+              <div className="group-row-action">—</div>
+            </div>
+          )}
+          {showAddGroupRow && (
+            <div className="stats-row stats-row-editor">
+              <div className="stats-editor">
+                <input
+                  className="input"
+                  placeholder="Group name"
+                  value={groupName}
+                  onChange={(event) => setGroupName(event.target.value)}
+                />
+                <input
+                  className="input"
+                  placeholder="Procs (optional)"
+                  value={groupParallel}
+                  onChange={(event) => setGroupParallel(event.target.value)}
+                />
+                <button className="action" onClick={addGroupAction}>
+                  Add group
+                </button>
+              </div>
+              {groupError && <div className="log-error">{groupError}</div>}
+            </div>
+          )}
+        </div>
+      </section>
+
       <section className="grid">
         <div className="card">
           <h3>Total tasks</h3>
@@ -1077,165 +1613,33 @@ export default function Page() {
 
       <section className="section-block">
         <div className="section-head">
-          <h2 className="section-title">Groups</h2>
-          <p className="section-note">Default stays pinned first. Click a chip to filter the task list.</p>
+          <h2 className="section-title">Completion callback</h2>
+          <p className="section-note">Global daemon hook that runs when a task finishes.</p>
         </div>
-        <div className="group-actions">
-          <button className="action primary" onClick={() => setShowAddGroupRow((prev) => !prev)}>
-            {showAddGroupRow ? "Hide add group" : "Add group"}
-          </button>
-        </div>
-        <div className="group-chips">
-          <button
-            className={`chip ${groupFilters.size === 0 ? "active" : ""}`}
-            onClick={() => startTransition(() => setGroupFilters(new Set()))}
-            style={{ "--group-color": groupColor("default") } as React.CSSProperties}
-          >
-            All groups
-          </button>
-          {groupStats.map((group) => {
-            const active = groupFilters.size === 0 || groupFilters.has(group.group);
-            return (
-            <button
-              className={`chip ${active ? "active" : "inactive"}`}
-              key={group.group}
-              onClick={() =>
-                startTransition(() =>
-                  setGroupFilters((prev) => {
-                    const next = new Set(prev);
-                    if (next.has(group.group)) {
-                      next.delete(group.group);
-                    } else {
-                      next.add(group.group);
-                    }
-                    return next;
-                  })
-                )
-              }
-              title={`${group.group} (${group.total})`}
-              style={{ "--group-color": groupColor(group.group) } as React.CSSProperties}
-            >
-              <span className="chip-label">{group.group}</span>
-              <span className="chip-count">{group.total}</span>
+        <div className="launch-panel">
+          <div className="callback-grid">
+            <input
+              className="input"
+              placeholder="Callback command (leave empty to disable)"
+              value={callbackCommand}
+              onChange={(event) => setCallbackCommand(event.target.value)}
+              disabled={callbackLoading || callbackSaving}
+            />
+            <input
+              className="input"
+              placeholder="Callback log lines (default 200)"
+              value={callbackLines}
+              onChange={(event) => setCallbackLines(event.target.value)}
+              disabled={callbackLoading || callbackSaving}
+            />
+            <button className="action" onClick={saveCallback} disabled={callbackLoading || callbackSaving}>
+              {callbackSaving ? "Saving…" : "Save callback"}
             </button>
-          )})}
-        </div>
-        <div className="stats-table">
-          <div className="stats-header">
-            <div>Group</div>
-            <div>Total</div>
-            <div>Running</div>
-            <div>Queued</div>
-            <div>Paused</div>
-            <div>Done</div>
-            <div>Success</div>
-            <div>Failed</div>
-            <div>Avg duration</div>
-            <div></div>
           </div>
-          {groupStats.map((group) => (
-            <div className="stats-row" key={group.group}>
-              <div className="truncate" title={group.group}>
-                <span className="group-pill" style={{ "--group-color": groupColor(group.group) } as React.CSSProperties}>
-                  {group.group}
-                </span>
-              </div>
-              <div>{group.total}</div>
-              <div>{group.running}</div>
-              <div>{group.queued}</div>
-              <div>{group.paused}</div>
-              <div>{group.done}</div>
-              <div>{group.success}</div>
-              <div>
-                {group.failed > 0 ? (
-                  <span className="tooltip-anchor" role="button" tabIndex={0}>
-                    <span className="failed-count">{group.failed}</span>
-                    <span className="tooltip">
-                      <strong>Failed task IDs</strong>
-                      <div className="tooltip-list">
-                        {group.failedIds.slice(0, 4).map((id) => (
-                          <span className="tooltip-item" key={id}>
-                            {id}
-                          </span>
-                        ))}
-                        {group.failedIds.length > 4 && <span className="tooltip-item">…</span>}
-                      </div>
-                    </span>
-                  </span>
-                ) : (
-                  group.failed
-                )}
-              </div>
-              <div>
-                {group.avgDuration} ± {group.stddevDuration}
-              </div>
-              <div className="group-row-action">
-                {group.group !== "default" && (
-                  <button
-                    className="icon-button"
-                    title={`Remove group ${group.group}`}
-                    onClick={() => {
-                      if (!window.confirm(`Remove group "${group.group}"?`)) return;
-                      setGroupError(null);
-                      const name = group.group;
-                      void (async () => {
-                        const body = { action: "remove", name };
-                        const res = await fetch("/api/groups", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify(body),
-                        });
-                        const json = (await res.json()) as { ok?: boolean; error?: string } | undefined;
-                        if (!json?.ok) {
-                          setGroupError(json?.error ?? "Failed to remove group.");
-                          return;
-                        }
-                        await load();
-                      })();
-                    }}
-                  >
-                    🗑
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-          {groupStats.length === 0 && (
-            <div className="stats-row">
-              <div>default</div>
-              <div>0</div>
-              <div>0</div>
-              <div>0</div>
-              <div>0</div>
-              <div>0</div>
-              <div>0</div>
-              <div>0</div>
-              <div>—</div>
-              <div className="group-row-action">—</div>
-            </div>
-          )}
-          {showAddGroupRow && (
-            <div className="stats-row stats-row-editor">
-              <div className="stats-editor">
-                <input
-                  className="input"
-                  placeholder="Group name"
-                  value={groupName}
-                  onChange={(event) => setGroupName(event.target.value)}
-                />
-                <input
-                  className="input"
-                  placeholder="Parallel tasks (optional)"
-                  value={groupParallel}
-                  onChange={(event) => setGroupParallel(event.target.value)}
-                />
-                <button className="action" onClick={addGroupAction}>
-                  Add group
-                </button>
-              </div>
-              {groupError && <div className="log-error">{groupError}</div>}
-            </div>
-          )}
+          {callbackLoading && <p className="notice">Loading callback config…</p>}
+          {callbackInfo && <p className="notice">{callbackInfo}</p>}
+          {callbackPath && <p className="notice">Config path: {callbackPath}</p>}
+          {callbackError && <div className="log-error">{callbackError}</div>}
         </div>
       </section>
 
@@ -1432,34 +1836,7 @@ export default function Page() {
             <div className="cell command">Command</div>
             <div className="cell actions">Actions</div>
           </div>
-          {displayedTasks.map((task) => (
-            <TaskRowView
-              key={task.id}
-              task={task}
-              isSelected={selectedIds.has(task.id)}
-              isActive={selectedTaskId === task.id}
-              isMenuOpen={openActionRowId === task.id}
-              isCopied={copiedTaskId === task.id}
-              pendingActions={pendingById.get(task.id) ?? EMPTY_PENDING}
-              actionDefs={actionDefs}
-              onToggleSelect={toggleSelect}
-              onOpenLog={(id) => {
-                setLogTaskId(id);
-                void loadLogs(id);
-                openLogModal();
-              }}
-              onToggleMenu={(id) => setOpenActionRowId((prev) => (prev === id ? null : id))}
-              onRunAction={(id, action) => void runTaskAction(id, action)}
-              onSelectRow={(id) => {
-                setSelectedTaskId(id);
-              }}
-              onOpenTask={(id) => router.push(`/task/${id}`)}
-              onCopyCommand={(id) => {
-                setCopiedTaskId(id);
-                setTimeout(() => setCopiedTaskId((prev) => (prev === id ? null : prev)), 1200);
-              }}
-            />
-          ))}
+          {taskRows}
         {displayedTasks.length === 0 && (
           <div className="table-row">
             <div className="cell task">—</div>
@@ -1496,76 +1873,6 @@ export default function Page() {
             </button>
           </div>
         )}
-      </section>
-
-      <section className="section-block">
-        <div className="section-head">
-          <h2 className="section-title">Task detail</h2>
-          <p className="section-note">Focus a task row to update this panel.</p>
-        </div>
-        <div className="detail-panel">
-          {selectedTask ? (
-            <>
-            <div className="detail-header">
-              <div>
-                <div className="badge">Task #{selectedTask.id}</div>
-                <h3>{selectedTask.command || "(no command)"}</h3>
-                <p className="notice">
-                  {selectedTask.group ?? "default"} · {selectedTask.status}
-                  {selectedTask.label ? ` · ${selectedTask.label}` : ""}
-                </p>
-              </div>
-              <div className="actions">
-                <button
-                  className="action"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setLogTaskId(selectedTask.id);
-                    void loadLogs(selectedTask.id);
-                    openLogModal();
-                  }}
-                >
-                  View logs
-                </button>
-              </div>
-            </div>
-            <div className="detail-grid">
-              <div className="card">
-                <h3>Status</h3>
-                <p>{selectedTask.status}</p>
-              </div>
-              <div className="card">
-                <h3>Group</h3>
-                <p>{selectedTask.group ?? "default"}</p>
-              </div>
-              <div className="card">
-                <h3>Duration</h3>
-                <p>{selectedDuration}</p>
-              </div>
-              <div className="card">
-                <h3>Priority</h3>
-                <p>{selectedTask.priority ?? "—"}</p>
-              </div>
-            </div>
-            <div className="detail-meta">
-              <div>
-                <strong>Path</strong>
-                <div>{selectedTask.path ?? "—"}</div>
-              </div>
-              <div>
-                <strong>Result</strong>
-                <div>{selectedTask.timing?.result ?? "—"}</div>
-              </div>
-              <div>
-                <strong>Label</strong>
-                <div>{selectedTask.label ?? "—"}</div>
-              </div>
-            </div>
-            </>
-          ) : (
-            <p className="notice">Select a task to see details.</p>
-          )}
-        </div>
       </section>
 
       <section className="section-block">

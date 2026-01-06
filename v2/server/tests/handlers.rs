@@ -1,10 +1,19 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, fs};
 
 use async_trait::async_trait;
 use serde_json::json;
 use tide::http::{Method, Request as HttpRequest, Url};
 
 use pueue_webui_v2_server::{create_app, AddTaskRequest, GroupActionRequest, PueueBackend};
+use pueue_lib::settings::Settings;
+
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
 
 #[derive(Default)]
 struct FakeBackend {
@@ -151,5 +160,52 @@ async fn task_action_requires_numeric_id() -> tide::Result<()> {
     let req = HttpRequest::new(Method::Post, Url::parse("http://localhost/task/abc")?);
     let res: tide::http::Response = app.respond(req).await?;
     assert_eq!(res.status(), 400);
+    Ok(())
+}
+
+#[async_std::test]
+async fn callback_config_roundtrip() -> tide::Result<()> {
+    let _guard = env_lock();
+    let mut path = env::temp_dir();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    path.push(format!("pueue-webui-callback-{unique}.yml"));
+
+    let settings = Settings::default();
+    settings
+        .save(&Some(path.clone()))
+        .map_err(|err| tide::Error::from_str(tide::StatusCode::InternalServerError, err.to_string()))?;
+
+    env::set_var("PUEUE_CONFIG", &path);
+    let app = create_app(Arc::new(FakeBackend::default()));
+
+    let req = HttpRequest::new(Method::Get, Url::parse("http://localhost/config/callback")?);
+    let mut res: tide::http::Response = app.respond(req).await?;
+    let body: serde_json::Value = res.body_json().await?;
+    assert!(body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+
+    let mut req = HttpRequest::new(Method::Post, Url::parse("http://localhost/config/callback")?);
+    req.set_body(json!({"callback": "echo hi", "callback_log_lines": 25}).to_string());
+    req.insert_header("Content-Type", "application/json");
+    let mut res: tide::http::Response = app.respond(req).await?;
+    let body: serde_json::Value = res.body_json().await?;
+    assert!(body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert_eq!(
+        body.pointer("/config/callback").and_then(|v| v.as_str()),
+        Some("echo hi")
+    );
+
+    let req = HttpRequest::new(Method::Get, Url::parse("http://localhost/config/callback")?);
+    let mut res: tide::http::Response = app.respond(req).await?;
+    let body: serde_json::Value = res.body_json().await?;
+    assert_eq!(
+        body.pointer("/config/callback_log_lines").and_then(|v| v.as_u64()),
+        Some(25)
+    );
+
+    env::remove_var("PUEUE_CONFIG");
+    let _ = fs::remove_file(path);
     Ok(())
 }

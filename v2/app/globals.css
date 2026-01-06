@@ -272,7 +272,7 @@ h1 {
 .stats-header,
 .stats-row {
   display: grid;
-  grid-template-columns: 1.4fr repeat(7, minmax(60px, 1fr)) 1.2fr 48px;
+  grid-template-columns: 1.4fr repeat(7, minmax(60px, 1fr)) 1.2fr minmax(110px, 0.8fr) 48px;
   gap: 12px;
   padding: 12px 16px;
   align-items: center;
@@ -294,6 +294,20 @@ h1 {
 .stats-row-editor {
   grid-template-columns: 1fr;
   align-items: stretch;
+}
+
+.group-parallel-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+  font-size: 0.82rem;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .stats-editor {
@@ -658,6 +672,13 @@ button.action:disabled {
   align-items: center;
 }
 
+.callback-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) auto;
+  align-items: center;
+}
+
 .group-management {
   display: grid;
   gap: 16px;
@@ -916,6 +937,10 @@ button.action:disabled {
   }
 
   .group-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .callback-grid {
     grid-template-columns: 1fr;
   }
 

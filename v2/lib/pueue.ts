@@ -19,13 +19,26 @@ async function backendFetch(path: string, init?: RequestInit) {
 }
 
 export async function getStatus(): Promise<Record<string, unknown>> {
-  const payload = await backendFetch("/status");
-  return payload.status as Record<string, unknown>;
+  return backendFetch("/status");
 }
 
 export async function getLog(taskId: string): Promise<unknown> {
   const payload = await backendFetch(`/logs/${taskId}`);
   return payload.log as unknown;
+}
+
+export async function getCallbackConfig(): Promise<Record<string, unknown>> {
+  return backendFetch("/config/callback");
+}
+
+export async function updateCallbackConfig(body: {
+  callback?: string;
+  callback_log_lines?: number;
+}): Promise<Record<string, unknown>> {
+  return backendFetch("/config/callback", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 const allowedActions = new Set([

@@ -6,8 +6,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const status = await getStatus();
-    return NextResponse.json({ ok: true, status });
+    const payload = await getStatus();
+    return NextResponse.json(payload);
   } catch (error) {
     return NextResponse.json(
       { ok: false, error: error instanceof Error ? error.message : "Unknown error" },

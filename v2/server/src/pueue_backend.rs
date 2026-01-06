@@ -15,7 +15,7 @@ use pueue_lib::network_blocking::socket::ConnectionSettings;
 use pueue_lib::network_blocking::BlockingClient;
 use pueue_lib::secret::read_shared_secret;
 use pueue_lib::settings::Settings;
-use pueue_lib::state::State;
+use pueue_lib::state::{Group, State};
 
 use crate::{AddTaskRequest, GroupActionRequest, PueueBackend};
 
@@ -70,6 +70,18 @@ impl RealBackend {
             client.send_request(Request::Status)?;
             match client.receive_response()? {
                 Response::Status(state) => Ok(*state),
+                Response::Failure(text) => bail!(text),
+                other => bail!("Unexpected response: {:?}", other),
+            }
+        })
+        .await
+    }
+
+    async fn get_groups(&self) -> Result<BTreeMap<String, Group>> {
+        self.with_client(|client| {
+            client.send_request(Request::Group(GroupRequest::List))?;
+            match client.receive_response()? {
+                Response::Group(response) => Ok(response.groups),
                 Response::Failure(text) => bail!(text),
                 other => bail!("Unexpected response: {:?}", other),
             }
@@ -132,7 +144,25 @@ impl RealBackend {
 impl PueueBackend for RealBackend {
     async fn status(&self) -> Result<serde_json::Value> {
         match self.get_state().await {
-            Ok(state) => Ok(serde_json::to_value(state)?),
+            Ok(mut state) => {
+                match self.get_groups().await {
+                    Ok(groups) => {
+                        if !groups.is_empty() {
+                            state.groups = groups;
+                        }
+                    }
+                    Err(error) if cli_fallback_enabled() => {
+                        log_cli_fallback_once("groups", &error.to_string());
+                        if let Ok(groups) = run_cli_groups() {
+                            if !groups.is_empty() {
+                                state.groups = groups;
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                }
+                Ok(serde_json::to_value(state)?)
+            }
             Err(error) if cli_fallback_enabled() => {
                 log_cli_fallback_once("status", &error.to_string());
                 let cli_status = run_cli_json(&["status", "--json"])?;
@@ -385,6 +415,12 @@ fn run_cli_group(request: GroupActionRequest) -> Result<serde_json::Value> {
     let refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
     let stdout = run_cli(&refs)?;
     Ok(json!({ "message": stdout }))
+}
+
+fn run_cli_groups() -> Result<BTreeMap<String, Group>> {
+    let json = run_cli_json(&["group", "--json"])?;
+    let groups: BTreeMap<String, Group> = serde_json::from_value(json)?;
+    Ok(groups)
 }
 
 fn run_cli_add_task(request: AddTaskRequest) -> Result<serde_json::Value> {

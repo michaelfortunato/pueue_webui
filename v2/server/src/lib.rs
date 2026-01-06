@@ -2,12 +2,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
+use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tide::http::mime;
 use tide::{Request, Response, StatusCode};
 
 pub mod pueue_backend;
+use pueue_lib::settings::Settings;
 
 #[async_trait]
 pub trait PueueBackend: Send + Sync {
@@ -34,6 +37,9 @@ pub fn create_app(backend: Arc<dyn PueueBackend>) -> tide::Server<AppState> {
     app.at("/logs/:id").get(logs_handler);
     app.at("/tasks").post(add_task_handler);
     app.at("/groups").post(group_handler);
+    app.at("/config/callback")
+        .get(callback_get_handler)
+        .post(callback_update_handler);
     app.at("/task/:id").post(task_action_handler);
     app
 }
@@ -58,6 +64,7 @@ async fn status_handler(req: Request<AppState>) -> tide::Result {
                         "status": entry.payload.clone(),
                         "cached": true,
                         "stats": entry.stats.clone(),
+                        "digest": entry.digest.clone(),
                     }),
                 );
             }
@@ -66,12 +73,13 @@ async fn status_handler(req: Request<AppState>) -> tide::Result {
 
     match req.state().backend.status().await {
         Ok(status) => {
-            let stats = compute_group_stats(&status);
+            let (stats, digest) = compute_group_stats(&status);
             if let Ok(mut cache) = req.state().status_cache.lock() {
                 cache.value = Some(StatusCacheEntry {
                     at: Instant::now(),
                     payload: status.clone(),
                     stats: stats.clone(),
+                    digest: digest.clone(),
                 });
             }
             json_response(
@@ -80,6 +88,7 @@ async fn status_handler(req: Request<AppState>) -> tide::Result {
                     "ok": true,
                     "status": status,
                     "stats": stats,
+                    "digest": digest,
                 }),
             )
         }
@@ -91,6 +100,70 @@ async fn status_handler(req: Request<AppState>) -> tide::Result {
             }),
         ),
     }
+}
+
+#[derive(Deserialize)]
+struct CallbackConfigRequest {
+    callback: Option<String>,
+    callback_log_lines: Option<usize>,
+}
+
+async fn callback_get_handler(_: Request<AppState>) -> tide::Result {
+    let config_path = config_path_override();
+    let (settings, found) = Settings::read(&config_path)
+        .map_err(|err| tide::Error::from_str(StatusCode::InternalServerError, err.to_string()))?;
+
+    json_response(
+        StatusCode::Ok,
+        json!({
+            "ok": true,
+            "config": {
+                "callback": settings.daemon.callback,
+                "callback_log_lines": settings.daemon.callback_log_lines,
+                "found": found,
+                "config_path": config_path.as_ref().map(|path| path.display().to_string()),
+            }
+        }),
+    )
+}
+
+async fn callback_update_handler(mut req: Request<AppState>) -> tide::Result {
+    let config_path = config_path_override();
+    let body: CallbackConfigRequest = req.body_json().await.map_err(|_| {
+        tide::Error::from_str(StatusCode::BadRequest, "Invalid JSON body")
+    })?;
+
+    let (mut settings, _found) = Settings::read(&config_path)
+        .map_err(|err| tide::Error::from_str(StatusCode::InternalServerError, err.to_string()))?;
+
+    if let Some(callback) = body.callback {
+        let trimmed = callback.trim().to_string();
+        if trimmed.is_empty() {
+            settings.daemon.callback = None;
+        } else {
+            settings.daemon.callback = Some(trimmed);
+        }
+    }
+
+    if let Some(lines) = body.callback_log_lines {
+        settings.daemon.callback_log_lines = lines;
+    }
+
+    settings
+        .save(&config_path)
+        .map_err(|err| tide::Error::from_str(StatusCode::InternalServerError, err.to_string()))?;
+
+    json_response(
+        StatusCode::Ok,
+        json!({
+            "ok": true,
+            "config": {
+                "callback": settings.daemon.callback,
+                "callback_log_lines": settings.daemon.callback_log_lines,
+                "config_path": config_path.as_ref().map(|path| path.display().to_string()),
+            }
+        }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -152,6 +225,10 @@ fn parse_task_id(req: &Request<AppState>) -> tide::Result<usize> {
     id.parse::<usize>().map_err(|_| {
         tide::Error::from_str(StatusCode::BadRequest, "Invalid task id")
     })
+}
+
+fn config_path_override() -> Option<PathBuf> {
+    std::env::var("PUEUE_CONFIG").ok().map(PathBuf::from)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -231,61 +308,100 @@ fn json_response(status: StatusCode, value: serde_json::Value) -> tide::Result<R
     Ok(response)
 }
 
-fn compute_group_stats(status: &serde_json::Value) -> serde_json::Value {
-    let mut stats = serde_json::Map::new();
+fn compute_group_stats(status: &serde_json::Value) -> (serde_json::Value, String) {
+    #[derive(Default)]
+    struct GroupStats {
+        total: u64,
+        running: u64,
+        queued: u64,
+        paused: u64,
+        done: u64,
+        success: u64,
+        failed: u64,
+        durations: Vec<f64>,
+        failed_ids: Vec<String>,
+    }
+
+    let mut stats: HashMap<String, GroupStats> = HashMap::new();
+    if let Some(groups) = status.get("groups").and_then(|v| v.as_object()) {
+        for name in groups.keys() {
+            stats.entry(name.clone()).or_default();
+        }
+    }
+    let empty_tasks = serde_json::Map::new();
     let tasks = status
         .get("tasks")
         .and_then(|value| value.as_object())
-        .cloned()
-        .unwrap_or_default();
+        .unwrap_or(&empty_tasks);
+    let mut task_keys: Vec<&String> = tasks.keys().collect();
+    task_keys.sort();
 
-    for (id, task) in tasks {
+    let mut hash: u64 = 5381;
+    let mut task_count: u64 = 0;
+
+    for id in task_keys {
+        let Some(task) = tasks.get(id) else { continue };
+        task_count += 1;
+        hash_str(&mut hash, id);
         let group = task.get("group").and_then(|v| v.as_str()).unwrap_or("default");
-        let entry = stats.entry(group.to_string()).or_insert_with(|| {
-            json!({
-                "total": 0u64,
-                "running": 0u64,
-                "queued": 0u64,
-                "paused": 0u64,
-                "done": 0u64,
-                "success": 0u64,
-                "failed": 0u64,
-                "durations": Vec::<f64>::new(),
-                "failed_ids": Vec::<String>::new(),
-            })
-        });
+        let entry = stats.entry(group.to_string()).or_default();
+        entry.total += 1;
 
-        let total = entry.get("total").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
-        entry["total"] = json!(total);
+        if let Some(command) = task.get("command") {
+            match command {
+                serde_json::Value::String(text) => hash_str(&mut hash, text),
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        if let Some(text) = item.as_str() {
+                            hash_str(&mut hash, text);
+                            hash_str(&mut hash, "|");
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(label) = task.get("label").and_then(|v| v.as_str()) {
+            hash_str(&mut hash, label);
+        }
+        if let Some(path) = task.get("path").and_then(|v| v.as_str()) {
+            hash_str(&mut hash, path);
+        }
+        if let Some(priority) = task.get("priority") {
+            hash_str(&mut hash, &priority.to_string());
+        }
+        if let Some(group_name) = task.get("group").and_then(|v| v.as_str()) {
+            hash_str(&mut hash, group_name);
+        }
 
         if let Some(status_obj) = task.get("status").and_then(|v| v.as_object()) {
             if let Some((key, detail)) = status_obj.iter().next() {
+                hash_str(&mut hash, key);
+                if let Some(detail_obj) = detail.as_object() {
+                    for field in ["start", "end", "enqueued_at", "result"] {
+                        if let Some(text) = detail_obj.get(field).and_then(|v| v.as_str()) {
+                            hash_str(&mut hash, text);
+                        }
+                    }
+                }
                 match key.as_str() {
                     "Running" => {
-                        entry["running"] = json!(entry.get("running").and_then(|v| v.as_u64()).unwrap_or(0) + 1);
+                        entry.running += 1;
                     }
                     "Queued" => {
-                        entry["queued"] = json!(entry.get("queued").and_then(|v| v.as_u64()).unwrap_or(0) + 1);
+                        entry.queued += 1;
                     }
                     "Paused" => {
-                        entry["paused"] = json!(entry.get("paused").and_then(|v| v.as_u64()).unwrap_or(0) + 1);
+                        entry.paused += 1;
                     }
                     "Done" => {
-                        entry["done"] = json!(entry.get("done").and_then(|v| v.as_u64()).unwrap_or(0) + 1);
+                        entry.done += 1;
                         let result = detail.get("result").and_then(|v| v.as_str()).unwrap_or("Unknown");
                         if result == "Success" {
-                            entry["success"] =
-                                json!(entry.get("success").and_then(|v| v.as_u64()).unwrap_or(0) + 1);
+                            entry.success += 1;
                         } else {
-                            entry["failed"] =
-                                json!(entry.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) + 1);
-                            let mut failed_ids = entry
-                                .get("failed_ids")
-                                .and_then(|v| v.as_array())
-                                .cloned()
-                                .unwrap_or_default();
-                            failed_ids.push(json!(id.clone()));
-                            entry["failed_ids"] = json!(failed_ids);
+                            entry.failed += 1;
+                            entry.failed_ids.push(id.clone());
                         }
                         let start = detail.get("start").and_then(|v| v.as_str());
                         let end = detail.get("end").and_then(|v| v.as_str());
@@ -295,13 +411,7 @@ fn compute_group_stats(status: &serde_json::Value) -> serde_json::Value {
                                 chrono::DateTime::parse_from_rfc3339(end),
                             ) {
                                 let duration = (end_ms.timestamp_millis() - start_ms.timestamp_millis()) as f64;
-                                let mut durations = entry
-                                    .get("durations")
-                                    .and_then(|v| v.as_array())
-                                    .cloned()
-                                    .unwrap_or_default();
-                                durations.push(json!(duration));
-                                entry["durations"] = json!(durations);
+                                entry.durations.push(duration);
                             }
                         }
                     }
@@ -313,12 +423,7 @@ fn compute_group_stats(status: &serde_json::Value) -> serde_json::Value {
 
     let mut final_stats = serde_json::Map::new();
     for (group, entry) in stats {
-        let durations = entry
-            .get("durations")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let nums: Vec<f64> = durations.iter().filter_map(|v| v.as_f64()).collect();
+        let nums = &entry.durations;
         let avg = if nums.is_empty() {
             None
         } else {
@@ -331,24 +436,53 @@ fn compute_group_stats(status: &serde_json::Value) -> serde_json::Value {
         } else {
             None
         };
+        let parallel = status
+            .get("groups")
+            .and_then(|v| v.as_object())
+            .and_then(|g| g.get(&group))
+            .and_then(|v| v.get("parallel_tasks"))
+            .and_then(|v| v.as_u64());
         final_stats.insert(
             group,
             json!({
-                "total": entry.get("total").and_then(|v| v.as_u64()).unwrap_or(0),
-                "running": entry.get("running").and_then(|v| v.as_u64()).unwrap_or(0),
-                "queued": entry.get("queued").and_then(|v| v.as_u64()).unwrap_or(0),
-                "paused": entry.get("paused").and_then(|v| v.as_u64()).unwrap_or(0),
-                "done": entry.get("done").and_then(|v| v.as_u64()).unwrap_or(0),
-                "success": entry.get("success").and_then(|v| v.as_u64()).unwrap_or(0),
-                "failed": entry.get("failed").and_then(|v| v.as_u64()).unwrap_or(0),
-                "failed_ids": entry.get("failed_ids").cloned().unwrap_or(json!([])),
+                "total": entry.total,
+                "running": entry.running,
+                "queued": entry.queued,
+                "paused": entry.paused,
+                "done": entry.done,
+                "success": entry.success,
+                "failed": entry.failed,
+                "failed_ids": entry.failed_ids,
                 "avg_ms": avg,
                 "stddev_ms": stddev,
+                "parallel": parallel,
             }),
         );
     }
 
-    json!({ "groups": final_stats })
+    if let Some(groups) = status.get("groups").and_then(|v| v.as_object()) {
+        let mut group_keys: Vec<&String> = groups.keys().collect();
+        group_keys.sort();
+        for name in group_keys {
+            if let Some(group) = groups.get(name).and_then(|v| v.as_object()) {
+                hash_str(&mut hash, name);
+                if let Some(parallel) = group.get("parallel_tasks") {
+                    hash_str(&mut hash, &parallel.to_string());
+                }
+                if let Some(state) = group.get("status").and_then(|v| v.as_str()) {
+                    hash_str(&mut hash, state);
+                }
+            }
+        }
+    }
+
+    (json!({ "groups": final_stats }), format!("{}:{}", hash, task_count))
+}
+
+fn hash_str(hash: &mut u64, value: &str) {
+    for byte in value.as_bytes() {
+        *hash = hash.wrapping_mul(33) ^ (u64::from(*byte));
+    }
 }
 
 #[derive(Default)]
@@ -361,4 +495,5 @@ struct StatusCacheEntry {
     at: Instant,
     payload: serde_json::Value,
     stats: serde_json::Value,
+    digest: String,
 }
