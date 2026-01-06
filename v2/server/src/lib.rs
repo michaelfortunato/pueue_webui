@@ -129,7 +129,6 @@ async fn logs_handler(req: Request<AppState>) -> tide::Result {
         .query_pairs()
         .find(|(key, _)| key == "lines")
         .and_then(|(_, value)| value.parse::<usize>().ok());
-
     match req.state().backend.logs(task_id, lines).await {
         Ok(logs) => json_response(
             StatusCode::Ok,

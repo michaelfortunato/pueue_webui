@@ -721,7 +721,7 @@ button.action:disabled {
   z-index: 1;
   width: min(1100px, 96vw);
   max-height: 90vh;
-  overflow: auto;
+  overflow: hidden;
   padding: 18px 20px 24px;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -730,6 +730,9 @@ button.action:disabled {
   resize: both;
   min-width: 520px;
   min-height: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .log-modal-header {
@@ -806,6 +809,19 @@ button.action:disabled {
 
 .log-preview-output {
   max-height: 180px;
+}
+
+.log-modal-content .log-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.log-modal-content .log-output {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
 }
 
 .log-error {

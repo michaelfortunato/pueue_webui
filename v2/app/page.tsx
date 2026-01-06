@@ -19,6 +19,7 @@ type TaskRow = {
   id: string;
   status: string;
   command: string;
+  commandDisplay: string;
   group?: string;
   path?: string;
   label?: string;
@@ -62,12 +63,14 @@ function normalizeTasks(status?: Record<string, unknown>): TaskRow[] {
         : Array.isArray(task?.command)
           ? task.command.join(" ")
           : "";
+    const commandDisplay = command.replace(/(--\S+)/g, "$1\u200b");
 
     const timing = extractTiming(task?.status);
     return {
       id,
       status: statusLabel(task?.status),
       command,
+      commandDisplay,
       group: task?.group,
       path: task?.path,
       label: typeof task?.label === "string" ? task.label : undefined,
@@ -328,7 +331,7 @@ const TaskRowView = memo(
               </button>
             </div>
             <div className="command-text" title={task.command}>
-              {task.command ? renderCommandText(task.command) : "(no command)"}
+              {task.command ? task.commandDisplay : "(no command)"}
             </div>
           </div>
         </div>
@@ -377,20 +380,6 @@ const TaskRowView = memo(
     prev.pendingActions === next.pendingActions
 );
 
-function renderCommandText(command: string) {
-  const parts = command.split(/(--\S+)/g);
-  return parts.map((part, index) => {
-    if (part.startsWith("--")) {
-      return (
-        <span key={`dash-${index}`}>
-          {part}
-          <wbr />
-        </span>
-      );
-    }
-    return <span key={`cmd-${index}`}>{part}</span>;
-  });
-}
 
 const GROUP_PALETTE = [
   "#5aa0ff",
@@ -452,6 +441,7 @@ export default function Page() {
   const [pageSize, setPageSize] = useState(200);
   const [pageIndex, setPageIndex] = useState(0);
   const loadInFlightRef = useRef(false);
+  const [isVisible, setIsVisible] = useState(true);
   const lastDigestRef = useRef<string | null>(null);
 
   const openLogModal = useCallback(() => {
@@ -495,6 +485,7 @@ export default function Page() {
     let live = true;
     const guardedLoad = async () => {
       if (!live) return;
+      if (!isVisible) return;
       await load();
     };
 
@@ -505,7 +496,13 @@ export default function Page() {
       live = false;
       clearInterval(timer);
     };
-  }, [load, pollMs]);
+  }, [load, pollMs, isVisible]);
+
+  useEffect(() => {
+    const handler = () => setIsVisible(!document.hidden);
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, []);
 
   const tasks = useMemo(() => normalizeTasks(data.status), [data.status]);
   const deferredSearch = useDeferredValue(search);
@@ -910,13 +907,26 @@ export default function Page() {
     () => parsedLogLines.some((line) => line.malformed),
     [parsedLogLines]
   );
+  const logWindow = useMemo(() => {
+    const limit = 1200;
+    if (parsedLogLines.length <= limit) {
+      return { lines: parsedLogLines, offset: 0, total: parsedLogLines.length, limit };
+    }
+    return {
+      lines: parsedLogLines.slice(-limit),
+      offset: parsedLogLines.length - limit,
+      total: parsedLogLines.length,
+      limit,
+    };
+  }, [parsedLogLines]);
 
-  async function loadLogs() {
-    if (!logTaskId) return;
+  async function loadLogs(targetId?: string) {
+    const id = targetId ?? logTaskId;
+    if (!id) return;
     const parsed = Number(logLines);
     const lines = Number.isFinite(parsed) && parsed > 0 ? parsed : 200;
     const query = `?lines=${lines}`;
-    const res = await fetch(`/api/logs/${logTaskId}${query}`, { cache: "no-store" });
+    const res = await fetch(`/api/logs/${id}${query}`, { cache: "no-store" });
     const json = (await res.json()) as ApiLogResponse;
     setLogData(json);
   }
@@ -1443,6 +1453,7 @@ export default function Page() {
               onToggleSelect={toggleSelect}
               onOpenLog={(id) => {
                 setLogTaskId(id);
+                void loadLogs(id);
                 openLogModal();
               }}
               onToggleMenu={(id) => setOpenActionRowId((prev) => (prev === id ? null : id))}
@@ -1519,6 +1530,7 @@ export default function Page() {
                   onClick={(event) => {
                     event.stopPropagation();
                     setLogTaskId(selectedTask.id);
+                    void loadLogs(selectedTask.id);
                     openLogModal();
                   }}
                 >
@@ -1662,18 +1674,25 @@ export default function Page() {
                   Malformed timestamp detected. Log parsing failed for at least one entry.
                 </div>
               )}
+              {logWindow.total > logWindow.lines.length && (
+                <div className="notice">
+                  Showing last {logWindow.lines.length} of {logWindow.total} log lines.
+                </div>
+              )}
               <div className="log-output">
-                {parsedLogLines.map((line, index) => (
+                {logWindow.lines.map((line, index) => (
                   <div
                     className={`log-line${line.malformed ? " log-line-error" : ""}`}
-                    key={`${index}-${line.timestamp ?? "nots"}`}
+                    key={`${logWindow.offset + index}-${line.timestamp ?? "nots"}`}
                   >
-                    <span className="log-index">{String(index + 1).padStart(4, "0")}</span>
+                    <span className="log-index">
+                      {String(logWindow.offset + index + 1).padStart(4, "0")}
+                    </span>
                     {line.timestamp && <span className="log-time">{line.timestamp}</span>}
                     <span className="log-text">{line.rest}</span>
                   </div>
                 ))}
-                {parsedLogLines.length === 0 && <div className="notice">No log output.</div>}
+                {logWindow.lines.length === 0 && <div className="notice">No log output.</div>}
               </div>
             </div>
           </div>
