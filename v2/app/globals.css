@@ -109,7 +109,7 @@ h1 {
 .table-header,
 .table-row {
   display: grid;
-  grid-template-columns: 90px 60px 140px 1.6fr 1fr 1.2fr;
+  grid-template-columns: 90px 60px 140px 1.6fr 1fr 100px 1.2fr;
   gap: 12px;
   padding: 14px 18px;
 }
@@ -318,6 +318,51 @@ button.action:disabled {
   background: rgba(9, 14, 13, 0.75);
 }
 
+.detail-panel {
+  margin-top: 12px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(9, 14, 13, 0.75);
+}
+
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.detail-header h3 {
+  margin: 8px 0 0;
+  font-size: 1.1rem;
+}
+
+.detail-grid {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.detail-meta {
+  margin-top: 16px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  color: var(--ink-2);
+  font-size: 0.95rem;
+}
+
+.detail-meta strong {
+  display: block;
+  color: var(--ink-3);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+
 .log-controls {
   display: flex;
   flex-wrap: wrap;
@@ -393,9 +438,11 @@ button.action:disabled {
   .table-header div:nth-child(4),
   .table-header div:nth-child(5),
   .table-header div:nth-child(6),
+  .table-header div:nth-child(7),
   .table-row div:nth-child(4),
   .table-row div:nth-child(5),
-  .table-row div:nth-child(6) {
+  .table-row div:nth-child(6),
+  .table-row div:nth-child(7) {
     display: none;
   }
 
@@ -415,6 +462,10 @@ button.action:disabled {
 
   .launch-grid {
     grid-template-columns: 1fr;
+  }
+
+  .detail-header {
+    flex-direction: column;
   }
 
   .log-line {

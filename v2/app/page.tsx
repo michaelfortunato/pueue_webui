@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useState, useTransition } from "react";
 
 type ApiStatusResponse = {
   ok: boolean;
@@ -20,6 +20,8 @@ type TaskRow = {
   command: string;
   group?: string;
   path?: string;
+  label?: string;
+  priority?: number;
   timing?: {
     state: "queued" | "running" | "paused" | "done" | "unknown";
     start?: string;
@@ -68,6 +70,8 @@ function normalizeTasks(status?: Record<string, unknown>): TaskRow[] {
       command,
       group: task?.group,
       path: task?.path,
+      label: typeof task?.label === "string" ? task.label : undefined,
+      priority: typeof task?.priority === "number" ? task.priority : undefined,
       timing,
     };
   });
@@ -141,6 +145,11 @@ function taskFilterKey(task: TaskRow) {
   return timing.state;
 }
 
+function canShowLogs(task: TaskRow) {
+  const state = task.timing?.state;
+  return state === "running" || state === "paused" || state === "done";
+}
+
 export default function Page() {
   const [data, setData] = useState<ApiStatusResponse>({ ok: true });
   const [loading, setLoading] = useState(true);
@@ -162,6 +171,8 @@ export default function Page() {
   const [addStashed, setAddStashed] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
+  const [isPending, startTransition] = useTransition();
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -192,14 +203,31 @@ export default function Page() {
   }, [load]);
 
   const tasks = useMemo(() => normalizeTasks(data.status), [data.status]);
+  const deferredSearch = useDeferredValue(search);
+  const deferredStatus = useDeferredValue(statusFilter);
+  const deferredGroup = useDeferredValue(groupFilter);
+  const deferredSort = useDeferredValue(sortBy);
+  const deferredQuickFilters = useDeferredValue(quickFilters);
+
+  const groupNames = useMemo(() => {
+    const names = new Set<string>();
+    tasks.forEach((task) => names.add(task.group ?? "default"));
+    const groups = (data.status as { groups?: Record<string, unknown> } | undefined)?.groups;
+    if (groups && typeof groups === "object") {
+      Object.keys(groups).forEach((name) => names.add(name));
+    }
+    return Array.from(names).sort((a, b) => {
+      if (a === "default") return -1;
+      if (b === "default") return 1;
+      return a.localeCompare(b);
+    });
+  }, [tasks, data.status]);
+
   const statusOptions = useMemo(() => {
     const unique = new Set(tasks.map((task) => task.status));
     return Array.from(unique).sort();
   }, [tasks]);
-  const groupOptions = useMemo(() => {
-    const unique = new Set(tasks.map((task) => task.group ?? "default"));
-    return Array.from(unique).sort();
-  }, [tasks]);
+  const groupOptions = useMemo(() => groupNames, [groupNames]);
 
   const counts = useMemo(() => {
     const total = tasks.length;
@@ -223,6 +251,19 @@ export default function Page() {
         durations: number[];
       }
     >();
+
+    groupNames.forEach((group) => {
+      stats.set(group, {
+        total: 0,
+        running: 0,
+        queued: 0,
+        paused: 0,
+        done: 0,
+        success: 0,
+        failed: 0,
+        durations: [],
+      });
+    });
 
     tasks.forEach((task) => {
       const group = task.group ?? "default";
@@ -269,8 +310,12 @@ export default function Page() {
           avgDuration: formatDuration(avgMs),
         };
       })
-      .sort((a, b) => a.group.localeCompare(b.group));
-  }, [tasks]);
+      .sort((a, b) => {
+        if (a.group === "default") return -1;
+        if (b.group === "default") return 1;
+        return a.group.localeCompare(b.group);
+      });
+  }, [tasks, groupNames]);
 
   useEffect(() => {
     const timer = setTimeout(() => setSearch(searchInput), 200);
@@ -278,7 +323,7 @@ export default function Page() {
   }, [searchInput]);
 
   const filteredTasks = useMemo(() => {
-    const query = search.trim().toLowerCase();
+    const query = deferredSearch.trim().toLowerCase();
     const filtered = tasks.filter((task) => {
       const group = task.group ?? "default";
       const matchesSearch =
@@ -286,14 +331,15 @@ export default function Page() {
         task.id.toLowerCase().includes(query) ||
         task.command.toLowerCase().includes(query) ||
         group.toLowerCase().includes(query);
-      const matchesStatus = statusFilter === "all" || task.status === statusFilter;
-      const matchesGroup = groupFilter === "all" || group === groupFilter;
-      const matchesQuick = quickFilters.size === 0 || quickFilters.has(taskFilterKey(task));
+      const matchesStatus = deferredStatus === "all" || task.status === deferredStatus;
+      const matchesGroup = deferredGroup === "all" || group === deferredGroup;
+      const matchesQuick =
+        deferredQuickFilters.size === 0 || deferredQuickFilters.has(taskFilterKey(task));
       return matchesSearch && matchesStatus && matchesGroup && matchesQuick;
     });
 
     const sorted = [...filtered];
-    const [sortKey, sortDir] = sortBy.split("-");
+    const [sortKey, sortDir] = deferredSort.split("-");
     sorted.sort((a, b) => {
       let value = 0;
       if (sortKey === "id") {
@@ -308,10 +354,21 @@ export default function Page() {
       return sortDir === "desc" ? -value : value;
     });
     return sorted;
-  }, [tasks, search, statusFilter, groupFilter, sortBy]);
+  }, [tasks, deferredSearch, deferredStatus, deferredGroup, deferredSort, deferredQuickFilters]);
 
   const allSelected =
     filteredTasks.length > 0 && filteredTasks.every((task) => selectedIds.has(task.id));
+
+  const selectedTask = useMemo(
+    () => tasks.find((task) => task.id === selectedTaskId) ?? null,
+    [tasks, selectedTaskId]
+  );
+
+  const selectedDuration = useMemo(() => {
+    if (!selectedTask?.timing) return "—";
+    if (selectedTask.timing.state !== "done") return "—";
+    return formatDuration(durationMs(selectedTask.timing.start, selectedTask.timing.end));
+  }, [selectedTask]);
 
   function toggleSelectAll() {
     if (allSelected) {
@@ -487,7 +544,7 @@ export default function Page() {
       <div className="group-chips">
         <button
           className={`chip ${groupFilter === "all" ? "active" : ""}`}
-          onClick={() => setGroupFilter("all")}
+          onClick={() => startTransition(() => setGroupFilter("all"))}
         >
           All groups
         </button>
@@ -495,7 +552,7 @@ export default function Page() {
           <button
             className={`chip ${groupFilter === group.group ? "active" : ""}`}
             key={group.group}
-            onClick={() => setGroupFilter(group.group)}
+            onClick={() => startTransition(() => setGroupFilter(group.group))}
           >
             {group.group} · {group.total}
           </button>
@@ -589,6 +646,68 @@ export default function Page() {
           {parsedLogLines.length === 0 && <div className="notice">No log output.</div>}
         </div>
       </div>
+      <h2 className="section-title">Task detail</h2>
+      <div className="detail-panel">
+        {selectedTask ? (
+          <>
+            <div className="detail-header">
+              <div>
+                <div className="badge">Task #{selectedTask.id}</div>
+                <h3>{selectedTask.command || "(no command)"}</h3>
+                <p className="notice">
+                  {selectedTask.group ?? "default"} · {selectedTask.status}
+                  {selectedTask.label ? ` · ${selectedTask.label}` : ""}
+                </p>
+              </div>
+              <div className="actions">
+                <button
+                  className="action"
+                  onClick={() => {
+                    setLogTaskId(selectedTask.id);
+                    loadLogs();
+                  }}
+                >
+                  View logs
+                </button>
+              </div>
+            </div>
+            <div className="detail-grid">
+              <div className="card">
+                <h3>Status</h3>
+                <p>{selectedTask.status}</p>
+              </div>
+              <div className="card">
+                <h3>Group</h3>
+                <p>{selectedTask.group ?? "default"}</p>
+              </div>
+              <div className="card">
+                <h3>Duration</h3>
+                <p>{selectedDuration}</p>
+              </div>
+              <div className="card">
+                <h3>Priority</h3>
+                <p>{selectedTask.priority ?? "—"}</p>
+              </div>
+            </div>
+            <div className="detail-meta">
+              <div>
+                <strong>Path</strong>
+                <div>{selectedTask.path ?? "—"}</div>
+              </div>
+              <div>
+                <strong>Result</strong>
+                <div>{selectedTask.timing?.result ?? "—"}</div>
+              </div>
+              <div>
+                <strong>Label</strong>
+                <div>{selectedTask.label ?? "—"}</div>
+              </div>
+            </div>
+          </>
+        ) : (
+          <p className="notice">Select a task to see details.</p>
+        )}
+      </div>
       <h2 className="section-title">Launch task</h2>
       <div className="launch-panel">
         <div className="launch-grid">
@@ -634,9 +753,13 @@ export default function Page() {
           className="input"
           placeholder="Search id, command, group…"
           value={searchInput}
-          onChange={(event) => setSearchInput(event.target.value)}
+          onChange={(event) => startTransition(() => setSearchInput(event.target.value))}
         />
-        <select className="input" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+        <select
+          className="input"
+          value={statusFilter}
+          onChange={(event) => startTransition(() => setStatusFilter(event.target.value))}
+        >
           <option value="all">All status</option>
           {statusOptions.map((status) => (
             <option value={status} key={status}>
@@ -644,7 +767,11 @@ export default function Page() {
             </option>
           ))}
         </select>
-        <select className="input" value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}>
+        <select
+          className="input"
+          value={groupFilter}
+          onChange={(event) => startTransition(() => setGroupFilter(event.target.value))}
+        >
           <option value="all">All groups</option>
           {groupOptions.map((group) => (
             <option value={group} key={group}>
@@ -652,7 +779,11 @@ export default function Page() {
             </option>
           ))}
         </select>
-        <select className="input" value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+        <select
+          className="input"
+          value={sortBy}
+          onChange={(event) => startTransition(() => setSortBy(event.target.value))}
+        >
           <option value="id-asc">Sort: ID ↑</option>
           <option value="id-desc">Sort: ID ↓</option>
           <option value="status-asc">Sort: Status A→Z</option>
@@ -675,15 +806,17 @@ export default function Page() {
                 type="checkbox"
                 checked={quickFilters.has(key)}
                 onChange={() =>
-                  setQuickFilters((prev) => {
-                    const next = new Set(prev);
-                    if (next.has(key)) {
-                      next.delete(key);
-                    } else {
-                      next.add(key);
-                    }
-                    return next;
-                  })
+                  startTransition(() =>
+                    setQuickFilters((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(key)) {
+                        next.delete(key);
+                      } else {
+                        next.add(key);
+                      }
+                      return next;
+                    })
+                  )
                 }
               />
               <span>{label}</span>
@@ -722,6 +855,7 @@ export default function Page() {
           <div>Status</div>
           <div>Command</div>
           <div>Group</div>
+          <div>Logs</div>
           <div>Actions</div>
         </div>
         {filteredTasks.map((task) => (
@@ -742,6 +876,18 @@ export default function Page() {
             </div>
             <div>{task.command || "(no command)"}</div>
             <div>{task.group ?? "default"}</div>
+            <div>
+              <button
+                className="action"
+                disabled={!canShowLogs(task)}
+                onClick={() => {
+                  setLogTaskId(task.id);
+                  loadLogs();
+                }}
+              >
+                Logs
+              </button>
+            </div>
             <div className="actions">
               {[
                 ["start", "Start"],
@@ -763,6 +909,9 @@ export default function Page() {
                   </button>
                 );
               })}
+              <button className="action" onClick={() => setSelectedTaskId(task.id)}>
+                Details
+              </button>
             </div>
           </div>
         ))}
@@ -774,6 +923,11 @@ export default function Page() {
             </div>
             <div>Launch a task with pueue add</div>
             <div>default</div>
+            <div>
+              <button className="action" disabled>
+                Logs
+              </button>
+            </div>
             <div className="actions">
               <button className="action" disabled>
                 Awaiting tasks

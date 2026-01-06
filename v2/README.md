@@ -36,6 +36,23 @@ cargo build
 This starts the backend as a child process and runs the Next.js UI in the current terminal.
 When you quit the UI (Ctrl-C), the backend is automatically stopped.
 
+### Optional zsh helper
+Add this to your `~/.zshrc`:
+```zsh
+pueue-gui () {
+  (
+    local repo="$HOME/projects/pueue_webui"
+    cd "$repo/v2" || exit 1
+    if [ ! -d node_modules ]; then
+      npm install || exit 1
+    fi
+    cd "$repo/v2/server" || exit 1
+    cargo build || exit 1
+    ./target/debug/pueue-gui
+  )
+}
+```
+
 ## Environment
 - `PUEUE_WEBUI_HOST` (server, optional): host:port for Rust service (default `127.0.0.1:9093`)
 - `PUEUE_V2_BACKEND_URL` (Next.js, optional): base URL for Rust service (default `http://127.0.0.1:9093`)
