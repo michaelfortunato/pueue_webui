@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 type ApiStatusResponse = {
@@ -189,13 +189,7 @@ function statusDigest(status?: Record<string, unknown>) {
     const task = tasks[id];
     const label = statusLabel(task?.status);
     const group = task?.group ?? "default";
-    const command =
-      typeof task?.command === "string"
-        ? task.command
-        : Array.isArray(task?.command)
-          ? task.command.join(" ")
-          : "";
-    const chunk = `${id}|${label}|${group}|${command}|${task?.label ?? ""}|${task?.priority ?? ""}`;
+    const chunk = `${id}|${label}|${group}|${task?.label ?? ""}|${task?.priority ?? ""}`;
     for (let i = 0; i < chunk.length; i += 1) {
       hash = (hash * 33) ^ chunk.charCodeAt(i);
     }
@@ -211,6 +205,177 @@ function statusDigest(status?: Record<string, unknown>) {
   }
   return `${hash >>> 0}:${count}`;
 }
+
+type ActionDef = { action: string; label: string; icon: string };
+
+type TaskRowProps = {
+  task: TaskRow;
+  isSelected: boolean;
+  isActive: boolean;
+  isMenuOpen: boolean;
+  isCopied: boolean;
+  pendingActions: Set<string>;
+  actionDefs: ActionDef[];
+  onToggleSelect: (id: string) => void;
+  onOpenLog: (id: string) => void;
+  onToggleMenu: (id: string) => void;
+  onRunAction: (id: string, action: string) => void;
+  onSelectRow: (id: string) => void;
+  onOpenTask: (id: string) => void;
+  onCopyCommand: (id: string) => void;
+};
+
+const TaskRowView = memo(
+  function TaskRowView({
+    task,
+    isSelected,
+    isActive,
+    isMenuOpen,
+    pendingActions,
+    actionDefs,
+    onToggleSelect,
+    onOpenLog,
+    onToggleMenu,
+    onRunAction,
+    onSelectRow,
+    onOpenTask,
+    onCopyCommand,
+    isCopied,
+  }: TaskRowProps) {
+    return (
+      <div
+        className={`table-row clickable${isActive ? " active" : ""}`}
+        onClick={(event) => {
+          const target = event.target as HTMLElement;
+          if (target.closest("button, input, select, textarea, label, a")) {
+            return;
+          }
+          onSelectRow(task.id);
+        }}
+        onDoubleClick={(event) => {
+          const target = event.target as HTMLElement;
+          if (target.closest("button, input, select, textarea, label, a")) {
+            return;
+          }
+          onOpenTask(task.id);
+        }}
+      >
+        <div className="cell task">
+          <label className="checkbox" onClick={(event) => event.stopPropagation()}>
+            <input type="checkbox" checked={isSelected} onChange={() => onToggleSelect(task.id)} />
+            <span className="sr-only">Select</span>
+          </label>
+          <span className="task-id">#{task.id}</span>
+          <span
+            className="group-pill"
+            title={task.group ?? "default"}
+            style={{ "--group-color": groupColor(task.group) } as React.CSSProperties}
+          >
+            {task.group ?? "default"}
+          </span>
+          <button
+            className="action mini"
+            disabled={!canShowLogs(task)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenLog(task.id);
+            }}
+          >
+            Logs
+          </button>
+        </div>
+        <div className="cell status">
+          <span className={`status-pill ${statusTone(task.status)}`}>{task.status}</span>
+          {task.timing?.start && <div className="status-meta">Started {formatTimestamp(task.timing.start)}</div>}
+          {task.timing?.end && <div className="status-meta">Ended {formatTimestamp(task.timing.end)}</div>}
+          {task.timing?.state === "done" && (
+            <div className="status-meta">Duration {formatDuration(durationMs(task.timing.start, task.timing.end))}</div>
+          )}
+        </div>
+        <div className="cell command">
+          <div className="command-block">
+            <div className="command-head">
+              <button
+                className="command-copy"
+                title="Copy command"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  const text = task.command || "";
+                  if (!text) return;
+                  const done = () => onCopyCommand(task.id);
+                  if (navigator?.clipboard?.writeText) {
+                    void navigator.clipboard.writeText(text).then(done);
+                    return;
+                  }
+                  const el = document.createElement("textarea");
+                  el.value = text;
+                  el.style.position = "fixed";
+                  el.style.opacity = "0";
+                  document.body.appendChild(el);
+                  el.select();
+                  document.execCommand("copy");
+                  document.body.removeChild(el);
+                  done();
+                }}
+              >
+                <span className="icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none">
+                    <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.5" />
+                    <rect x="4" y="4" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.5" />
+                  </svg>
+                </span>
+                {isCopied ? "Copied" : "Copy"}
+              </button>
+            </div>
+            <div className="command-text" title={task.command}>
+              {task.command ? renderCommandText(task.command) : "(no command)"}
+            </div>
+          </div>
+        </div>
+        <div className="cell actions">
+          <button
+            className="action icon"
+            title="Actions"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleMenu(task.id);
+            }}
+          >
+            ⋯
+          </button>
+          {isMenuOpen && (
+            <div className="action-menu" onClick={(event) => event.stopPropagation()}>
+              {actionDefs.map((item) => {
+                const disabled = pendingActions.has(`${task.id}:${item.action}`);
+                return (
+                  <button
+                    className="action"
+                    key={item.action}
+                    disabled={disabled}
+                    onClick={() => onRunAction(task.id, item.action)}
+                  >
+                    <span className="action-icon">{item.icon}</span>
+                    <span>{disabled ? "Working…" : item.label}</span>
+                  </button>
+                );
+              })}
+              <button className="action" onClick={() => onSelectRow(task.id)}>
+                Details
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  },
+  (prev, next) =>
+    prev.task === next.task &&
+    prev.isSelected === next.isSelected &&
+    prev.isActive === next.isActive &&
+    prev.isMenuOpen === next.isMenuOpen &&
+    prev.isCopied === next.isCopied &&
+    prev.pendingActions === next.pendingActions
+);
 
 function renderCommandText(command: string) {
   const parts = command.split(/(--\S+)/g);
@@ -236,6 +401,8 @@ const GROUP_PALETTE = [
   "#69d19a",
   "#d58cff",
 ];
+
+const EMPTY_PENDING = new Set<string>();
 
 function groupColor(name: string | undefined) {
   const key = (name ?? "default").toLowerCase();
@@ -284,6 +451,7 @@ export default function Page() {
   const [renderMode, setRenderMode] = useState<"auto" | "paginate">("auto");
   const [pageSize, setPageSize] = useState(200);
   const [pageIndex, setPageIndex] = useState(0);
+  const loadInFlightRef = useRef(false);
   const lastDigestRef = useRef<string | null>(null);
 
   const openLogModal = useCallback(() => {
@@ -299,6 +467,8 @@ export default function Page() {
   }, [isLogModalOpen]);
 
   const load = useCallback(async () => {
+    if (loadInFlightRef.current) return;
+    loadInFlightRef.current = true;
     try {
       const res = await fetch("/api/status", { cache: "no-store" });
       const json = (await res.json()) as ApiStatusResponse;
@@ -316,6 +486,7 @@ export default function Page() {
     } catch (error) {
       setData({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
     } finally {
+      loadInFlightRef.current = false;
       setLoading(false);
     }
   }, []);
@@ -378,6 +549,32 @@ export default function Page() {
   }, [tasks]);
 
   const groupStats = useMemo(() => {
+    const statsFromServer = data.status && "stats" in data && (data as any).stats;
+    if (statsFromServer && statsFromServer.groups && typeof statsFromServer.groups === "object") {
+      const entries = Object.entries(statsFromServer.groups as Record<string, any>).map(([group, entry]) => {
+        const avgDuration = formatDuration(entry.avg_ms ?? undefined);
+        const stddevDuration = formatDuration(entry.stddev_ms ?? undefined);
+        return {
+          group,
+          total: entry.total ?? 0,
+          running: entry.running ?? 0,
+          queued: entry.queued ?? 0,
+          paused: entry.paused ?? 0,
+          done: entry.done ?? 0,
+          success: entry.success ?? 0,
+          failed: entry.failed ?? 0,
+          durations: [],
+          failedIds: Array.isArray(entry.failed_ids) ? entry.failed_ids.map(String) : [],
+          avgDuration,
+          stddevDuration,
+        };
+      });
+      return entries.sort((a, b) => {
+        if (a.group === "default") return -1;
+        if (b.group === "default") return 1;
+        return a.group.localeCompare(b.group);
+      });
+    }
     const stats = new Map<
       string,
       {
@@ -466,7 +663,7 @@ export default function Page() {
         if (b.group === "default") return 1;
         return a.group.localeCompare(b.group);
       });
-  }, [tasks, groupNames]);
+  }, [tasks, groupNames, data]);
 
   useEffect(() => {
     const timer = setTimeout(() => setSearch(searchInput), 200);
@@ -525,6 +722,18 @@ export default function Page() {
   const allSelected =
     displayedTasks.length > 0 && displayedTasks.every((task) => selectedIds.has(task.id));
 
+  const pendingById = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    pendingActions.forEach((key) => {
+      const [id, action] = key.split(":");
+      if (!id || !action) return;
+      const set = map.get(id) ?? new Set<string>();
+      set.add(action);
+      map.set(id, set);
+    });
+    return map;
+  }, [pendingActions]);
+
   const actionDefs = useMemo(
     () => [
       { action: "start", label: "Start", icon: "▶" },
@@ -550,12 +759,14 @@ export default function Page() {
 
   function toggleSelectAll() {
     if (allSelected) {
-      setSelectedIds(new Set());
+      startTransition(() => setSelectedIds(new Set()));
       return;
     }
     const next = new Set(selectedIds);
     displayedTasks.forEach((task) => next.add(task.id));
-    setSelectedIds(next);
+    startTransition(() => setSelectedIds(next));
+    setSelectedTaskId(null);
+    setLogTaskId("");
   }
 
   function toggleSelect(id: string) {
@@ -565,7 +776,10 @@ export default function Page() {
     } else {
       next.add(id);
     }
-    setSelectedIds(next);
+    startTransition(() => setSelectedIds(next));
+    if (next.size !== 1) {
+      setLogTaskId("");
+    }
   }
 
   useEffect(() => {
@@ -800,15 +1014,30 @@ export default function Page() {
           <p>{counts.total}</p>
         </div>
         <div className="card">
-          <h3>Running</h3>
+          <h3>
+            <span className="stat-icon running" aria-hidden="true">
+              ▶
+            </span>
+            Running
+          </h3>
           <p>{counts.running}</p>
         </div>
         <div className="card">
-          <h3>Queued</h3>
+          <h3>
+            <span className="stat-icon queued" aria-hidden="true">
+              ⏳
+            </span>
+            Queued
+          </h3>
           <p>{counts.queued}</p>
         </div>
         <div className="card">
-          <h3>Completed</h3>
+          <h3>
+            <span className="stat-icon completed" aria-hidden="true">
+              ✓
+            </span>
+            Completed
+          </h3>
           <p>{counts.completed}</p>
         </div>
         <div className="card">
@@ -1064,7 +1293,11 @@ export default function Page() {
                 </div>
               ))
             ) : (
-              <div className="notice">Select a task to preview logs.</div>
+              <div className="notice">
+                {selectedIds.size > 1
+                  ? "Multiple tasks selected. Click a task to preview logs."
+                  : "Select a task to preview logs."}
+              </div>
             )}
             {logTaskId && parsedLogLines.length === 0 && (
               <div className="notice">No log output loaded yet.</div>
@@ -1198,156 +1431,33 @@ export default function Page() {
             <div className="cell actions">Actions</div>
           </div>
           {displayedTasks.map((task) => (
-            <div
-              className={`table-row clickable${selectedTaskId === task.id ? " active" : ""}`}
+            <TaskRowView
               key={task.id}
-              onClick={(event) => {
-                const target = event.target as HTMLElement;
-                if (target.closest("button, input, select, textarea, label, a")) {
-                  return;
-                }
-                setSelectedTaskId(task.id);
-                setLogTaskId(task.id);
+              task={task}
+              isSelected={selectedIds.has(task.id)}
+              isActive={selectedTaskId === task.id}
+              isMenuOpen={openActionRowId === task.id}
+              isCopied={copiedTaskId === task.id}
+              pendingActions={pendingById.get(task.id) ?? EMPTY_PENDING}
+              actionDefs={actionDefs}
+              onToggleSelect={toggleSelect}
+              onOpenLog={(id) => {
+                setLogTaskId(id);
+                openLogModal();
               }}
-              onDoubleClick={(event) => {
-                const target = event.target as HTMLElement;
-                if (target.closest("button, input, select, textarea, label, a")) {
-                  return;
-                }
-                router.push(`/task/${task.id}`);
+              onToggleMenu={(id) => setOpenActionRowId((prev) => (prev === id ? null : id))}
+              onRunAction={(id, action) => void runTaskAction(id, action)}
+              onSelectRow={(id) => {
+                setSelectedTaskId(id);
+                setLogTaskId(id);
               }}
-            >
-              <div className="cell task">
-                <label className="checkbox" onClick={(event) => event.stopPropagation()}>
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.has(task.id)}
-                    onChange={() => toggleSelect(task.id)}
-                  />
-                  <span className="sr-only">Select</span>
-                </label>
-                <span className="task-id">#{task.id}</span>
-                <span
-                  className="group-pill"
-                  title={task.group ?? "default"}
-                  style={{ "--group-color": groupColor(task.group) } as React.CSSProperties}
-                >
-                  {task.group ?? "default"}
-                </span>
-                <button
-                  className="action mini"
-                  disabled={!canShowLogs(task)}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setLogTaskId(task.id);
-                    openLogModal();
-                  }}
-                >
-                  Logs
-                </button>
-              </div>
-              <div className="cell status">
-                <span className={`status-pill ${statusTone(task.status)}`}>{task.status}</span>
-                {task.timing?.start && (
-                  <div className="status-meta">
-                    Started {formatTimestamp(task.timing.start)}
-                  </div>
-                )}
-                {task.timing?.end && (
-                  <div className="status-meta">
-                    Ended {formatTimestamp(task.timing.end)}
-                  </div>
-                )}
-                {task.timing?.state === "done" && (
-                  <div className="status-meta">
-                    Duration {formatDuration(durationMs(task.timing.start, task.timing.end))}
-                  </div>
-                )}
-              </div>
-              <div className="cell command">
-                <div className="command-block">
-                  <div className="command-head">
-                    <button
-                      className="command-copy"
-                      title="Copy command"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        const text = task.command || "";
-                        if (!text) return;
-                        const done = () => {
-                          setCopiedTaskId(task.id);
-                          setTimeout(() => setCopiedTaskId((prev) => (prev === task.id ? null : prev)), 1200);
-                        };
-                        if (navigator?.clipboard?.writeText) {
-                          void navigator.clipboard.writeText(text).then(done);
-                          return;
-                        }
-                        const el = document.createElement("textarea");
-                        el.value = text;
-                        el.style.position = "fixed";
-                        el.style.opacity = "0";
-                        document.body.appendChild(el);
-                        el.select();
-                        document.execCommand("copy");
-                        document.body.removeChild(el);
-                        done();
-                      }}
-                    >
-                      <span className="icon" aria-hidden="true">
-                        <svg viewBox="0 0 24 24" fill="none">
-                          <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.5" />
-                          <rect x="4" y="4" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.5" />
-                        </svg>
-                      </span>
-                      {copiedTaskId === task.id ? "Copied" : "Copy"}
-                    </button>
-                  </div>
-              <div className="command-text" title={task.command}>
-                    {task.command ? renderCommandText(task.command) : "(no command)"}
-                  </div>
-                </div>
-              </div>
-              <div className="cell actions">
-                <button
-                  className="action icon"
-                  title="Actions"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setOpenActionRowId((prev) => (prev === task.id ? null : task.id));
-                  }}
-                >
-                  ⋯
-                </button>
-                {openActionRowId === task.id && (
-                  <div className="action-menu" onClick={(event) => event.stopPropagation()}>
-                    {actionDefs.map((item) => {
-                      const disabled = pendingActions.has(`${task.id}:${item.action}`);
-                      return (
-                        <button
-                          className="action"
-                          key={item.action}
-                          disabled={disabled}
-                          onClick={() => void runTaskAction(task.id, item.action)}
-                        >
-                          <span className="action-icon">{item.icon}</span>
-                          <span>{disabled ? "Working…" : item.label}</span>
-                        </button>
-                      );
-                    })}
-                    <button
-                      className="action"
-                      onClick={() => {
-                        setSelectedTaskId(task.id);
-                        setLogTaskId(task.id);
-                      }}
-                    >
-                      Details
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-        ))}
+              onOpenTask={(id) => router.push(`/task/${id}`)}
+              onCopyCommand={(id) => {
+                setCopiedTaskId(id);
+                setTimeout(() => setCopiedTaskId((prev) => (prev === id ? null : prev)), 1200);
+              }}
+            />
+          ))}
         {displayedTasks.length === 0 && (
           <div className="table-row">
             <div className="cell task">—</div>

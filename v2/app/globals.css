@@ -151,6 +151,9 @@ h1 {
   font-size: 1rem;
   color: var(--ink-2);
   font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .card p {
@@ -312,7 +315,7 @@ h1 {
   border-top: 1px solid rgba(255, 255, 255, 0.05);
   align-items: start;
   content-visibility: auto;
-  contain-intrinsic-size: 120px 1px;
+  contain-intrinsic-size: 140px 1px;
   contain: layout paint;
 }
 
@@ -964,4 +967,33 @@ button.action.mini {
   display: flex;
   align-items: center;
   justify-content: flex-start;
+}
+.stat-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.stat-icon.running {
+  color: #5aa0ff;
+  border-color: rgba(90, 160, 255, 0.4);
+  background: rgba(90, 160, 255, 0.12);
+}
+
+.stat-icon.queued {
+  color: #f2b94f;
+  border-color: rgba(242, 185, 79, 0.45);
+  background: rgba(242, 185, 79, 0.12);
+}
+
+.stat-icon.completed {
+  color: #62d09b;
+  border-color: rgba(98, 208, 155, 0.45);
+  background: rgba(98, 208, 155, 0.12);
 }
