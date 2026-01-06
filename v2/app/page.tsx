@@ -31,8 +31,6 @@ type TaskRow = {
   };
 };
 
-const POLL_MS = 2000;
-
 function statusLabel(status: unknown): string {
   if (typeof status === "string") {
     return status;
@@ -80,11 +78,17 @@ function normalizeTasks(status?: Record<string, unknown>): TaskRow[] {
 
 function statusTone(status: string) {
   const lower = status.toLowerCase();
-  if (["failed", "killed", "stashed", "panic"].some((s) => lower.includes(s))) {
+  if (["failed", "killed", "panic"].some((s) => lower.includes(s))) {
     return "danger";
   }
-  if (["paused", "queued", "locked"].some((s) => lower.includes(s))) {
+  if (["queued", "paused", "locked"].some((s) => lower.includes(s))) {
     return "warn";
+  }
+  if (["stashed", "staged"].some((s) => lower.includes(s))) {
+    return "muted";
+  }
+  if (["done", "success"].some((s) => lower.includes(s))) {
+    return "success";
   }
   return "";
 }
@@ -167,19 +171,34 @@ function canShowLogs(task: TaskRow) {
   return state === "running" || state === "paused" || state === "done";
 }
 
+function renderCommandText(command: string) {
+  const parts = command.split(/(--\S+)/g);
+  return parts.map((part, index) => {
+    if (part.startsWith("--")) {
+      return (
+        <span key={`dash-${index}`}>
+          {part}
+          <wbr />
+        </span>
+      );
+    }
+    return <span key={`cmd-${index}`}>{part}</span>;
+  });
+}
+
 const GROUP_PALETTE = [
-  "#27d3a6",
+  "#5aa0ff",
+  "#7b6cff",
+  "#f2b94f",
+  "#ff7a7a",
   "#4cc3ff",
-  "#f0a93b",
-  "#ff8f7a",
-  "#b58bff",
-  "#7bd88f",
-  "#f06292",
+  "#69d19a",
+  "#d58cff",
 ];
 
 function groupColor(name: string | undefined) {
   const key = (name ?? "default").toLowerCase();
-  if (key === "default") return "#27d3a6";
+  if (key === "default") return "#5aa0ff";
   let hash = 0;
   for (let i = 0; i < key.length; i += 1) {
     hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
@@ -193,7 +212,7 @@ export default function Page() {
   const [pendingActions, setPendingActions] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [groupFilter, setGroupFilter] = useState("all");
+  const [groupFilters, setGroupFilters] = useState<Set<string>>(new Set());
   const [sortBy, setSortBy] = useState("id-asc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [logTaskId, setLogTaskId] = useState("");
@@ -216,6 +235,9 @@ export default function Page() {
   const [showAddGroupRow, setShowAddGroupRow] = useState(false);
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
   const logSectionRef = useRef<HTMLDivElement | null>(null);
+  const [pollMs, setPollMs] = useState(2000);
+  const [openActionRowId, setOpenActionRowId] = useState<string | null>(null);
+  const [copiedTaskId, setCopiedTaskId] = useState<string | null>(null);
 
   const openLogModal = useCallback(() => {
     setIsLogModalOpen(true);
@@ -249,18 +271,18 @@ export default function Page() {
     };
 
     guardedLoad();
-    const timer = setInterval(guardedLoad, POLL_MS);
+    const timer = setInterval(guardedLoad, pollMs);
 
     return () => {
       live = false;
       clearInterval(timer);
     };
-  }, [load]);
+  }, [load, pollMs]);
 
   const tasks = useMemo(() => normalizeTasks(data.status), [data.status]);
   const deferredSearch = useDeferredValue(search);
   const deferredStatus = useDeferredValue(statusFilter);
-  const deferredGroup = useDeferredValue(groupFilter);
+  const deferredGroupFilters = useDeferredValue(groupFilters);
   const deferredSort = useDeferredValue(sortBy);
   const deferredQuickFilters = useDeferredValue(quickFilters);
 
@@ -311,6 +333,7 @@ export default function Page() {
         success: number;
         failed: number;
         durations: number[];
+        failedIds: string[];
       }
     >();
 
@@ -324,6 +347,7 @@ export default function Page() {
         success: 0,
         failed: 0,
         durations: [],
+        failedIds: [],
       });
     });
 
@@ -339,6 +363,7 @@ export default function Page() {
           success: 0,
           failed: 0,
           durations: [],
+          failedIds: [],
         });
       }
       const entry = stats.get(group)!;
@@ -354,6 +379,7 @@ export default function Page() {
           entry.success += 1;
         } else {
           entry.failed += 1;
+          entry.failedIds.push(task.id);
         }
         const duration = durationMs(timing.start, timing.end);
         if (duration !== undefined) entry.durations.push(duration);
@@ -401,7 +427,7 @@ export default function Page() {
         task.command.toLowerCase().includes(query) ||
         group.toLowerCase().includes(query);
       const matchesStatus = deferredStatus === "all" || task.status === deferredStatus;
-      const matchesGroup = deferredGroup === "all" || group === deferredGroup;
+      const matchesGroup = deferredGroupFilters.size === 0 || deferredGroupFilters.has(group);
       const matchesQuick =
         deferredQuickFilters.size === 0 || deferredQuickFilters.has(taskFilterKey(task));
       return matchesSearch && matchesStatus && matchesGroup && matchesQuick;
@@ -423,10 +449,22 @@ export default function Page() {
       return sortDir === "desc" ? -value : value;
     });
     return sorted;
-  }, [tasks, deferredSearch, deferredStatus, deferredGroup, deferredSort, deferredQuickFilters]);
+  }, [tasks, deferredSearch, deferredStatus, deferredGroupFilters, deferredSort, deferredQuickFilters]);
 
   const allSelected =
     filteredTasks.length > 0 && filteredTasks.every((task) => selectedIds.has(task.id));
+
+  const actionDefs = useMemo(
+    () => [
+      { action: "start", label: "Start", icon: "▶" },
+      { action: "pause", label: "Pause", icon: "⏸" },
+      { action: "resume", label: "Resume", icon: "⏵" },
+      { action: "restart", label: "Restart", icon: "↻" },
+      { action: "kill", label: "Stop", icon: "■" },
+      { action: "remove", label: "Remove", icon: "✕" },
+    ],
+    []
+  );
 
   const selectedTask = useMemo(
     () => tasks.find((task) => task.id === selectedTaskId) ?? null,
@@ -556,6 +594,7 @@ export default function Page() {
   }, [logData]);
 
   const parsedLogLines = useMemo(() => {
+    if (!logTaskId) return [];
     const lines = logText.split(/\r?\n/);
     return lines.map((line) => {
       const match = line.match(
@@ -589,7 +628,10 @@ export default function Page() {
   }
 
   useEffect(() => {
-    if (!logTaskId) return;
+    if (!logTaskId) {
+      setLogData(null);
+      return;
+    }
     const timer = setTimeout(() => {
       void loadLogs();
     }, 200);
@@ -610,19 +652,30 @@ export default function Page() {
       )}
       <header>
         <div>
-          <div className="badge">Local-first Pueue control</div>
           <h1>Pueue WebUI v2</h1>
-          <p className="notice">
-            {loading
-              ? "Connecting to pueue…"
-              : data.ok
-                ? "Live view, polling every 2s"
-                : `Error: ${data.error ?? "Unknown error"}`}
-          </p>
-        </div>
-        <div className="card">
-          <h3>Daemon status</h3>
-          <p>{data.ok ? "Online" : "Offline"}</p>
+          <div className="header-meta">
+            <p className="notice">
+              {loading
+                ? "Connecting to pueue…"
+                : data.ok
+                  ? "Live view"
+                  : `Error: ${data.error ?? "Unknown error"}`}
+            </p>
+            <label className="header-label">
+              Refresh
+              <select
+                className="input"
+                value={String(pollMs)}
+                onChange={(event) => setPollMs(Number(event.target.value))}
+              >
+                <option value="1000">1s</option>
+                <option value="2000">2s</option>
+                <option value="5000">5s</option>
+                <option value="10000">10s</option>
+                <option value="30000">30s</option>
+              </select>
+            </label>
+          </div>
         </div>
       </header>
 
@@ -672,30 +725,46 @@ export default function Page() {
         <div className="section-head">
           <h2 className="section-title">Groups</h2>
           <p className="section-note">Default stays pinned first. Click a chip to filter the task list.</p>
-          <div className="section-actions">
-            <button className="action" onClick={() => setShowAddGroupRow((prev) => !prev)}>
-              {showAddGroupRow ? "Hide add group" : "Add group"}
-            </button>
-          </div>
+        </div>
+        <div className="group-actions">
+          <button className="action primary" onClick={() => setShowAddGroupRow((prev) => !prev)}>
+            {showAddGroupRow ? "Hide add group" : "Add group"}
+          </button>
         </div>
         <div className="group-chips">
           <button
-            className={`chip ${groupFilter === "all" ? "active" : ""}`}
-            onClick={() => startTransition(() => setGroupFilter("all"))}
+            className={`chip ${groupFilters.size === 0 ? "active" : ""}`}
+            onClick={() => startTransition(() => setGroupFilters(new Set()))}
+            style={{ "--group-color": groupColor("default") } as React.CSSProperties}
           >
             All groups
           </button>
-          {groupStats.map((group) => (
+          {groupStats.map((group) => {
+            const active = groupFilters.size === 0 || groupFilters.has(group.group);
+            return (
             <button
-              className={`chip ${groupFilter === group.group ? "active" : ""}`}
+              className={`chip ${active ? "active" : "inactive"}`}
               key={group.group}
-              onClick={() => startTransition(() => setGroupFilter(group.group))}
+              onClick={() =>
+                startTransition(() =>
+                  setGroupFilters((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(group.group)) {
+                      next.delete(group.group);
+                    } else {
+                      next.add(group.group);
+                    }
+                    return next;
+                  })
+                )
+              }
               title={`${group.group} (${group.total})`}
+              style={{ "--group-color": groupColor(group.group) } as React.CSSProperties}
             >
               <span className="chip-label">{group.group}</span>
               <span className="chip-count">{group.total}</span>
             </button>
-          ))}
+          )})}
         </div>
         <div className="stats-table">
           <div className="stats-header">
@@ -723,7 +792,26 @@ export default function Page() {
               <div>{group.paused}</div>
               <div>{group.done}</div>
               <div>{group.success}</div>
-              <div>{group.failed}</div>
+              <div>
+                {group.failed > 0 ? (
+                  <span className="tooltip-anchor" role="button" tabIndex={0}>
+                    <span className="failed-count">{group.failed}</span>
+                    <span className="tooltip">
+                      <strong>Failed task IDs</strong>
+                      <div className="tooltip-list">
+                        {group.failedIds.slice(0, 4).map((id) => (
+                          <span className="tooltip-item" key={id}>
+                            {id}
+                          </span>
+                        ))}
+                        {group.failedIds.length > 4 && <span className="tooltip-item">…</span>}
+                      </div>
+                    </span>
+                  </span>
+                ) : (
+                  group.failed
+                )}
+              </div>
               <div>
                 {group.avgDuration} ± {group.stddevDuration}
               </div>
@@ -827,6 +915,14 @@ export default function Page() {
             <button className="action" onClick={() => setIsLogModalOpen(true)}>
               Open full viewer
             </button>
+            <a
+              className="action link"
+              href={`/logs?task=${encodeURIComponent(logTaskId || "")}&lines=${encodeURIComponent(logLines)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open in new tab
+            </a>
             <span className="notice">
               {logData?.ok === false ? `Log error: ${logData.error ?? "Unknown"}` : " "}
             </span>
@@ -837,20 +933,22 @@ export default function Page() {
             </div>
           )}
           <div className="log-output log-preview-output">
-            {parsedLogLines.slice(0, 12).map((line, index) => (
-              <div
-                className={`log-line${line.malformed ? " log-line-error" : ""}`}
-                key={`${index}-${line.timestamp ?? "nots"}`}
-              >
-                <span className="log-index">{String(index + 1).padStart(4, "0")}</span>
-                {line.timestamp && <span className="log-time">{line.timestamp}</span>}
-                <span className="log-text">{line.rest}</span>
-              </div>
-            ))}
-            {parsedLogLines.length === 0 && (
-              <div className="notice">
-                {logTaskId ? "No log output loaded yet." : "Pick a task to load logs."}
-              </div>
+            {logTaskId ? (
+              parsedLogLines.slice(0, 12).map((line, index) => (
+                <div
+                  className={`log-line${line.malformed ? " log-line-error" : ""}`}
+                  key={`${index}-${line.timestamp ?? "nots"}`}
+                >
+                  <span className="log-index">{String(index + 1).padStart(4, "0")}</span>
+                  {line.timestamp && <span className="log-time">{line.timestamp}</span>}
+                  <span className="log-text">{line.rest}</span>
+                </div>
+              ))
+            ) : (
+              <div className="notice">Select a task to preview logs.</div>
+            )}
+            {logTaskId && parsedLogLines.length === 0 && (
+              <div className="notice">No log output loaded yet.</div>
             )}
           </div>
         </div>
@@ -882,10 +980,22 @@ export default function Page() {
         </select>
         <select
           className="input"
-          value={groupFilter}
-          onChange={(event) => startTransition(() => setGroupFilter(event.target.value))}
+          value={
+            groupFilters.size === 0 ? "all" : groupFilters.size === 1 ? Array.from(groupFilters)[0] : "multiple"
+          }
+          onChange={(event) =>
+            startTransition(() => {
+              const value = event.target.value;
+              if (value === "all") {
+                setGroupFilters(new Set());
+                return;
+              }
+              setGroupFilters(new Set([value]));
+            })
+          }
         >
           <option value="all">All groups</option>
+          {groupFilters.size > 1 && <option value="multiple">Multiple groups</option>}
           {groupOptions.map((group) => (
             <option value={group} key={group}>
               {group}
@@ -937,38 +1047,30 @@ export default function Page() {
           ))}
         </div>
         <div className="batch-actions">
-          {[
-            ["start", "Start ▶︎"],
-            ["pause", "Pause ⏸"],
-            ["resume", "Resume"],
-            ["restart", "Restart"],
-            ["kill", "Stop ⏹"],
-            ["remove", "Remove"],
-          ].map(([action, label]) => (
+          {actionDefs.map((item) => (
             <button
               className="action"
-              key={action}
+              key={item.action}
               disabled={selectedIds.size === 0}
-              onClick={() => runBatchAction(action)}
+              onClick={() => runBatchAction(item.action)}
             >
-              {label} selected
+              <span className="action-icon">{item.icon}</span>
+              <span>{item.label} selected</span>
             </button>
           ))}
         </div>
       </div>
         <div className="table">
           <div className="table-header">
-            <div className="cell select">
+            <div className="cell task">
               <label className="checkbox">
                 <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
                 <span>Select</span>
               </label>
+              <span>Task</span>
             </div>
-            <div className="cell id">ID</div>
             <div className="cell status">Status</div>
             <div className="cell command">Command</div>
-            <div className="cell group">Group</div>
-            <div className="cell logs">Logs</div>
             <div className="cell actions">Actions</div>
           </div>
           {filteredTasks.map((task) => (
@@ -984,17 +1086,35 @@ export default function Page() {
                 setLogTaskId(task.id);
               }}
             >
-              <div className="cell select">
-              <label className="checkbox" onClick={(event) => event.stopPropagation()}>
-                <input
-                  type="checkbox"
-                  checked={selectedIds.has(task.id)}
-                  onChange={() => toggleSelect(task.id)}
-                />
-                <span>Pick</span>
-              </label>
+              <div className="cell task">
+                <label className="checkbox" onClick={(event) => event.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(task.id)}
+                    onChange={() => toggleSelect(task.id)}
+                  />
+                  <span className="sr-only">Select</span>
+                </label>
+                <span className="task-id">#{task.id}</span>
+                <span
+                  className="group-pill"
+                  title={task.group ?? "default"}
+                  style={{ "--group-color": groupColor(task.group) } as React.CSSProperties}
+                >
+                  {task.group ?? "default"}
+                </span>
+                <button
+                  className="action mini"
+                  disabled={!canShowLogs(task)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setLogTaskId(task.id);
+                    openLogModal();
+                  }}
+                >
+                  Logs
+                </button>
               </div>
-              <div className="cell id">{task.id}</div>
               <div className="cell status">
                 <span className={`status-pill ${statusTone(task.status)}`}>{task.status}</span>
                 {task.timing?.start && (
@@ -1014,108 +1134,96 @@ export default function Page() {
                 )}
               </div>
               <div className="cell command">
-                <div className="command-wrap">
-                  <div className="command-text" title={task.command}>
-                    {task.command || "(no command)"}
-                  </div>
-                  <button
-                    className="command-copy"
-                    title="Copy command"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      const text = task.command || "";
-                      if (!text) return;
-                      if (navigator?.clipboard?.writeText) {
-                        void navigator.clipboard.writeText(text);
-                        return;
-                      }
-                      const el = document.createElement("textarea");
-                      el.value = text;
-                      el.style.position = "fixed";
-                      el.style.opacity = "0";
-                      document.body.appendChild(el);
-                      el.select();
-                      document.execCommand("copy");
-                      document.body.removeChild(el);
-                    }}
-                  >
-                    Copy
-                  </button>
-                </div>
-              </div>
-              <div className="cell group">
-                <span
-                  className="group-pill"
-                  title={task.group ?? "default"}
-                  style={{ "--group-color": groupColor(task.group) } as React.CSSProperties}
-                >
-                  {task.group ?? "default"}
-                </span>
-              </div>
-              <div className="cell logs">
-                <button
-                  className="action"
-                  disabled={!canShowLogs(task)}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setLogTaskId(task.id);
-                    openLogModal();
-                  }}
-                >
-                  Logs
-                </button>
-              </div>
-              <div className="cell actions actions">
-                {[
-                  ["start", "Start ▶︎"],
-                  ["pause", "Pause ⏸"],
-                  ["resume", "Resume"],
-                  ["restart", "Restart"],
-                  ["kill", "Stop ⏹"],
-                  ["remove", "Remove"],
-                ].map(([action, label]) => {
-                  const disabled = pendingActions.has(`${task.id}:${action}`);
-                  return (
+                <div className="command-block">
+                  <div className="command-head">
                     <button
-                      className="action"
-                      key={action}
-                      disabled={disabled}
+                      className="command-copy"
+                      title="Copy command"
                       onClick={(event) => {
                         event.stopPropagation();
-                        void runTaskAction(task.id, action);
+                        const text = task.command || "";
+                        if (!text) return;
+                        const done = () => {
+                          setCopiedTaskId(task.id);
+                          setTimeout(() => setCopiedTaskId((prev) => (prev === task.id ? null : prev)), 1200);
+                        };
+                        if (navigator?.clipboard?.writeText) {
+                          void navigator.clipboard.writeText(text).then(done);
+                          return;
+                        }
+                        const el = document.createElement("textarea");
+                        el.value = text;
+                        el.style.position = "fixed";
+                        el.style.opacity = "0";
+                        document.body.appendChild(el);
+                        el.select();
+                        document.execCommand("copy");
+                        document.body.removeChild(el);
+                        done();
                       }}
                     >
-                      {disabled ? "Working…" : label}
+                      <span className="icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none">
+                          <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.5" />
+                          <rect x="4" y="4" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.5" />
+                        </svg>
+                      </span>
+                      {copiedTaskId === task.id ? "Copied" : "Copy"}
                     </button>
-                  );
-                })}
+                  </div>
+              <div className="command-text" title={task.command}>
+                    {task.command ? renderCommandText(task.command) : "(no command)"}
+                  </div>
+                </div>
+              </div>
+              <div className="cell actions">
                 <button
-                  className="action"
+                  className="action icon"
+                  title="Actions"
                   onClick={(event) => {
                     event.stopPropagation();
-                    setSelectedTaskId(task.id);
-                    setLogTaskId(task.id);
+                    setOpenActionRowId((prev) => (prev === task.id ? null : task.id));
                   }}
                 >
-                  Details
+                  ⋯
                 </button>
+                {openActionRowId === task.id && (
+                  <div className="action-menu" onClick={(event) => event.stopPropagation()}>
+                    {actionDefs.map((item) => {
+                      const disabled = pendingActions.has(`${task.id}:${item.action}`);
+                      return (
+                        <button
+                          className="action"
+                          key={item.action}
+                          disabled={disabled}
+                          onClick={() => void runTaskAction(task.id, item.action)}
+                        >
+                          <span className="action-icon">{item.icon}</span>
+                          <span>{disabled ? "Working…" : item.label}</span>
+                        </button>
+                      );
+                    })}
+                    <button
+                      className="action"
+                      onClick={() => {
+                        setSelectedTaskId(task.id);
+                        setLogTaskId(task.id);
+                      }}
+                    >
+                      Details
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
         ))}
         {filteredTasks.length === 0 && (
           <div className="table-row">
-            <div className="cell select">—</div>
-            <div className="cell id">—</div>
+            <div className="cell task">—</div>
             <div className="cell status">
               <span className="status-pill">No tasks</span>
             </div>
             <div className="cell command">Launch a task with pueue add</div>
-            <div className="cell group">default</div>
-            <div className="cell logs">
-              <button className="action" disabled>
-                Logs
-              </button>
-            </div>
             <div className="cell actions actions">
               <button className="action" disabled>
                 Awaiting tasks
@@ -1275,6 +1383,14 @@ export default function Page() {
                   />
                   <span>Local time</span>
                 </label>
+                <a
+                  className="action link"
+                  href={`/logs?task=${encodeURIComponent(logTaskId || "")}&lines=${encodeURIComponent(logLines)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open in new tab
+                </a>
                 <span className="notice">
                   {logData?.ok === false ? `Log error: ${logData.error ?? "Unknown"}` : " "}
                 </span>
