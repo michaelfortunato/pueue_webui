@@ -1,0 +1,3 @@
+[submodule "v2/pueue-lib"]
+	path = v2/pueue-lib
+	url = https://github.com/Mephistophiles/pueue-lib
