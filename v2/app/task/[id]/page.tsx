@@ -87,6 +87,18 @@ export default function TaskPage() {
       return { timestamp: formatted, rest, malformed: false };
     });
   }, [logText, taskId, useLocalTime]);
+  const logWindow = useMemo(() => {
+    const limit = 1200;
+    if (parsedLogLines.length <= limit) {
+      return { lines: parsedLogLines, offset: 0, total: parsedLogLines.length, limit };
+    }
+    return {
+      lines: parsedLogLines.slice(-limit),
+      offset: parsedLogLines.length - limit,
+      total: parsedLogLines.length,
+      limit,
+    };
+  }, [parsedLogLines]);
 
   return (
     <main>
@@ -143,14 +155,21 @@ export default function TaskPage() {
               Open logs in new tab
             </a>
           </div>
+          {logWindow.total > logWindow.lines.length && (
+            <div className="notice">
+              Showing last {logWindow.lines.length} of {logWindow.total} log lines.
+            </div>
+          )}
           <div className="log-output">
             {taskId ? (
-              parsedLogLines.map((line, index) => (
+              logWindow.lines.map((line, index) => (
                 <div
                   className={`log-line${line.malformed ? " log-line-error" : ""}`}
-                  key={`${index}-${line.timestamp ?? "nots"}`}
+                  key={`${logWindow.offset + index}-${line.timestamp ?? "nots"}`}
                 >
-                  <span className="log-index">{String(index + 1).padStart(4, "0")}</span>
+                  <span className="log-index">
+                    {String(logWindow.offset + index + 1).padStart(4, "0")}
+                  </span>
                   {line.timestamp && <span className="log-time">{line.timestamp}</span>}
                   <span className="log-text">{line.rest}</span>
                 </div>

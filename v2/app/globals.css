@@ -811,6 +811,18 @@ button.action:disabled {
   max-height: 180px;
 }
 
+.log-page-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 65vh;
+}
+
+.log-page-output {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
 .log-modal-content .log-panel {
   flex: 1;
   min-height: 0;
@@ -840,6 +852,8 @@ button.action:disabled {
   gap: 10px;
   padding: 4px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+  content-visibility: auto;
+  contain-intrinsic-size: 24px 1px;
 }
 
 .log-line:last-child {

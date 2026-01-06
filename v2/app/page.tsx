@@ -763,7 +763,6 @@ export default function Page() {
     displayedTasks.forEach((task) => next.add(task.id));
     startTransition(() => setSelectedIds(next));
     setSelectedTaskId(null);
-    setLogTaskId("");
   }
 
   function toggleSelect(id: string) {
@@ -774,9 +773,6 @@ export default function Page() {
       next.add(id);
     }
     startTransition(() => setSelectedIds(next));
-    if (next.size !== 1) {
-      setLogTaskId("");
-    }
   }
 
   useEffect(() => {
@@ -1303,11 +1299,7 @@ export default function Page() {
                 </div>
               ))
             ) : (
-              <div className="notice">
-                {selectedIds.size > 1
-                  ? "Multiple tasks selected. Click a task to preview logs."
-                  : "Select a task to preview logs."}
-              </div>
+              <div className="notice">Enter a task id to preview logs.</div>
             )}
             {logTaskId && parsedLogLines.length === 0 && (
               <div className="notice">No log output loaded yet.</div>
@@ -1460,7 +1452,6 @@ export default function Page() {
               onRunAction={(id, action) => void runTaskAction(id, action)}
               onSelectRow={(id) => {
                 setSelectedTaskId(id);
-                setLogTaskId(id);
               }}
               onOpenTask={(id) => router.push(`/task/${id}`)}
               onCopyCommand={(id) => {

@@ -1800,6 +1800,7 @@ dependencies = [
  "anyhow",
  "async-std",
  "async-trait",
+ "chrono",
  "ctrlc",
  "daemonize",
  "env_logger",
