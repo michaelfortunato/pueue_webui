@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 
 type ApiStatusResponse = {
   ok: boolean;
@@ -166,9 +167,49 @@ function taskFilterKey(task: TaskRow) {
   return timing.state;
 }
 
+function isFailedTask(task: TaskRow) {
+  const timing = task.timing;
+  if (timing?.state === "done") {
+    return timing.result !== "Success";
+  }
+  return task.status.toLowerCase().includes("failed");
+}
+
 function canShowLogs(task: TaskRow) {
   const state = task.timing?.state;
   return state === "running" || state === "paused" || state === "done";
+}
+
+function statusDigest(status?: Record<string, unknown>) {
+  if (!status || typeof status !== "object") return "empty";
+  const tasks = (status as { tasks?: Record<string, any> }).tasks ?? {};
+  let hash = 5381;
+  let count = 0;
+  for (const id in tasks) {
+    const task = tasks[id];
+    const label = statusLabel(task?.status);
+    const group = task?.group ?? "default";
+    const command =
+      typeof task?.command === "string"
+        ? task.command
+        : Array.isArray(task?.command)
+          ? task.command.join(" ")
+          : "";
+    const chunk = `${id}|${label}|${group}|${command}|${task?.label ?? ""}|${task?.priority ?? ""}`;
+    for (let i = 0; i < chunk.length; i += 1) {
+      hash = (hash * 33) ^ chunk.charCodeAt(i);
+    }
+    count += 1;
+  }
+  const groups = (status as { groups?: Record<string, any> }).groups ?? {};
+  for (const name in groups) {
+    const g = groups[name];
+    const chunk = `${name}|${g?.parallel_tasks ?? ""}|${g?.status ?? ""}`;
+    for (let i = 0; i < chunk.length; i += 1) {
+      hash = (hash * 33) ^ chunk.charCodeAt(i);
+    }
+  }
+  return `${hash >>> 0}:${count}`;
 }
 
 function renderCommandText(command: string) {
@@ -216,7 +257,7 @@ export default function Page() {
   const [sortBy, setSortBy] = useState("id-asc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [logTaskId, setLogTaskId] = useState("");
-  const [logLines, setLogLines] = useState("200");
+  const [logLines, setLogLines] = useState("");
   const [logData, setLogData] = useState<ApiLogResponse | null>(null);
   const [useLocalTime, setUseLocalTime] = useState(true);
   const [quickFilters, setQuickFilters] = useState<Set<string>>(new Set());
@@ -235,9 +276,15 @@ export default function Page() {
   const [showAddGroupRow, setShowAddGroupRow] = useState(false);
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
   const logSectionRef = useRef<HTMLDivElement | null>(null);
-  const [pollMs, setPollMs] = useState(2000);
+  const [pollMs, setPollMs] = useState(750);
+  const [pollInput, setPollInput] = useState("0.75");
   const [openActionRowId, setOpenActionRowId] = useState<string | null>(null);
   const [copiedTaskId, setCopiedTaskId] = useState<string | null>(null);
+  const router = useRouter();
+  const [renderMode, setRenderMode] = useState<"auto" | "paginate">("auto");
+  const [pageSize, setPageSize] = useState(200);
+  const [pageIndex, setPageIndex] = useState(0);
+  const lastDigestRef = useRef<string | null>(null);
 
   const openLogModal = useCallback(() => {
     setIsLogModalOpen(true);
@@ -255,6 +302,16 @@ export default function Page() {
     try {
       const res = await fetch("/api/status", { cache: "no-store" });
       const json = (await res.json()) as ApiStatusResponse;
+      if (json.ok) {
+        const nextDigest = statusDigest(json.status);
+        if (nextDigest === lastDigestRef.current) {
+          setLoading(false);
+          return;
+        }
+        lastDigestRef.current = nextDigest;
+      } else {
+        lastDigestRef.current = null;
+      }
       setData(json);
     } catch (error) {
       setData({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
@@ -308,16 +365,15 @@ export default function Page() {
 
   const counts = useMemo(() => {
     const total = tasks.length;
-    const running = tasks.filter((task) => task.status.toLowerCase().includes("running")).length;
-    const queued = tasks.filter((task) => task.status.toLowerCase().includes("queued")).length;
-    const failed = tasks.filter((task) => task.status.toLowerCase().includes("failed")).length;
-    return { total, running, queued, failed };
+    const running = tasks.filter((task) => task.timing?.state === "running").length;
+    const queued = tasks.filter((task) => task.timing?.state === "queued").length;
+    const completed = tasks.filter((task) => task.timing?.state === "done").length;
+    const failed = tasks.filter((task) => isFailedTask(task)).length;
+    return { total, running, queued, completed, failed };
   }, [tasks]);
 
   const failedIds = useMemo(() => {
-    const ids = tasks
-      .filter((task) => task.status.toLowerCase().includes("failed"))
-      .map((task) => task.id);
+    const ids = tasks.filter((task) => isFailedTask(task)).map((task) => task.id);
     return ids.sort((a, b) => Number(a) - Number(b));
   }, [tasks]);
 
@@ -451,8 +507,23 @@ export default function Page() {
     return sorted;
   }, [tasks, deferredSearch, deferredStatus, deferredGroupFilters, deferredSort, deferredQuickFilters]);
 
+  const maxRows = 500;
+  const autoLimited = filteredTasks.length > maxRows ? filteredTasks.slice(0, maxRows) : filteredTasks;
+  const pageCount = useMemo(() => {
+    if (renderMode !== "paginate") return 1;
+    return Math.max(1, Math.ceil(filteredTasks.length / pageSize));
+  }, [renderMode, filteredTasks.length, pageSize]);
+
+  const displayedTasks = useMemo(() => {
+    if (renderMode === "paginate") {
+      const start = pageIndex * pageSize;
+      return filteredTasks.slice(start, start + pageSize);
+    }
+    return autoLimited;
+  }, [filteredTasks, pageIndex, pageSize, renderMode, autoLimited]);
+
   const allSelected =
-    filteredTasks.length > 0 && filteredTasks.every((task) => selectedIds.has(task.id));
+    displayedTasks.length > 0 && displayedTasks.every((task) => selectedIds.has(task.id));
 
   const actionDefs = useMemo(
     () => [
@@ -483,7 +554,7 @@ export default function Page() {
       return;
     }
     const next = new Set(selectedIds);
-    filteredTasks.forEach((task) => next.add(task.id));
+    displayedTasks.forEach((task) => next.add(task.id));
     setSelectedIds(next);
   }
 
@@ -496,6 +567,14 @@ export default function Page() {
     }
     setSelectedIds(next);
   }
+
+  useEffect(() => {
+    if (renderMode !== "paginate") {
+      setPageIndex(0);
+      return;
+    }
+    setPageIndex((prev) => Math.min(prev, Math.max(0, pageCount - 1)));
+  }, [renderMode, pageCount]);
 
   async function runTaskAction(id: string, action: string) {
     const key = `${id}:${action}`;
@@ -620,8 +699,9 @@ export default function Page() {
 
   async function loadLogs() {
     if (!logTaskId) return;
-    const lines = Number(logLines);
-    const query = Number.isFinite(lines) && lines > 0 ? `?lines=${lines}` : "";
+    const parsed = Number(logLines);
+    const lines = Number.isFinite(parsed) && parsed > 0 ? parsed : 200;
+    const query = `?lines=${lines}`;
     const res = await fetch(`/api/logs/${logTaskId}${query}`, { cache: "no-store" });
     const json = (await res.json()) as ApiLogResponse;
     setLogData(json);
@@ -663,19 +743,54 @@ export default function Page() {
             </p>
             <label className="header-label">
               Refresh
-              <select
+              <input
                 className="input"
-                value={String(pollMs)}
-                onChange={(event) => setPollMs(Number(event.target.value))}
-              >
-                <option value="1000">1s</option>
-                <option value="2000">2s</option>
-                <option value="5000">5s</option>
-                <option value="10000">10s</option>
-                <option value="30000">30s</option>
-              </select>
+                value={pollInput}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setPollInput(value);
+                  const seconds = Number(value);
+                  if (Number.isFinite(seconds) && seconds > 0) {
+                    setPollMs(Math.max(250, Math.round(seconds * 1000)));
+                  }
+                }}
+                placeholder="seconds"
+                inputMode="decimal"
+              />
             </label>
           </div>
+          <details className="header-advanced">
+            <summary>Advanced</summary>
+            <div className="advanced-controls">
+              <label className="header-label">
+                Row rendering
+                <select
+                  className="input"
+                  value={renderMode}
+                  onChange={(event) => setRenderMode(event.target.value as "auto" | "paginate")}
+                >
+                  <option value="auto">Auto (all rows)</option>
+                  <option value="paginate">Pagination</option>
+                </select>
+              </label>
+              {renderMode === "paginate" && (
+                <label className="header-label">
+                  Page size
+                  <input
+                    className="input"
+                    value={String(pageSize)}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      if (Number.isFinite(next) && next > 0) {
+                        setPageSize(Math.max(25, Math.min(1000, Math.floor(next))));
+                      }
+                    }}
+                    inputMode="numeric"
+                  />
+                </label>
+              )}
+            </div>
+          </details>
         </div>
       </header>
 
@@ -691,6 +806,10 @@ export default function Page() {
         <div className="card">
           <h3>Queued</h3>
           <p>{counts.queued}</p>
+        </div>
+        <div className="card">
+          <h3>Completed</h3>
+          <p>{counts.completed}</p>
         </div>
         <div className="card">
           <h3>Failed</h3>
@@ -902,7 +1021,7 @@ export default function Page() {
               className="input"
               value={logLines}
               onChange={(event) => setLogLines(event.target.value)}
-              placeholder="Lines"
+              placeholder="Lines (default 200)"
             />
             <label className="checkbox">
               <input
@@ -959,6 +1078,11 @@ export default function Page() {
           <h2 className="section-title">Tasks</h2>
           <p className="section-note">Click a row to focus it and sync the detail + log viewer.</p>
         </div>
+        {renderMode === "auto" && filteredTasks.length > maxRows && (
+          <div className="notice">
+            Showing the first {maxRows} tasks for performance. Use Advanced → Row rendering to view all tasks.
+          </div>
+        )}
         <div className="toolbar">
         <input
           className="input"
@@ -1073,7 +1197,7 @@ export default function Page() {
             <div className="cell command">Command</div>
             <div className="cell actions">Actions</div>
           </div>
-          {filteredTasks.map((task) => (
+          {displayedTasks.map((task) => (
             <div
               className={`table-row clickable${selectedTaskId === task.id ? " active" : ""}`}
               key={task.id}
@@ -1084,6 +1208,13 @@ export default function Page() {
                 }
                 setSelectedTaskId(task.id);
                 setLogTaskId(task.id);
+              }}
+              onDoubleClick={(event) => {
+                const target = event.target as HTMLElement;
+                if (target.closest("button, input, select, textarea, label, a")) {
+                  return;
+                }
+                router.push(`/task/${task.id}`);
               }}
             >
               <div className="cell task">
@@ -1217,7 +1348,7 @@ export default function Page() {
               </div>
             </div>
         ))}
-        {filteredTasks.length === 0 && (
+        {displayedTasks.length === 0 && (
           <div className="table-row">
             <div className="cell task">—</div>
             <div className="cell status">
@@ -1232,6 +1363,27 @@ export default function Page() {
           </div>
         )}
         </div>
+        {renderMode === "paginate" && (
+          <div className="pagination">
+            <button
+              className="action"
+              disabled={pageIndex === 0}
+              onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))}
+            >
+              Prev
+            </button>
+            <span className="notice">
+              Page {pageIndex + 1} of {pageCount}
+            </span>
+            <button
+              className="action"
+              disabled={pageIndex >= pageCount - 1}
+              onClick={() => setPageIndex((prev) => Math.min(pageCount - 1, prev + 1))}
+            >
+              Next
+            </button>
+          </div>
+        )}
       </section>
 
       <section className="section-block">
@@ -1373,7 +1525,7 @@ export default function Page() {
                   className="input"
                   value={logLines}
                   onChange={(event) => setLogLines(event.target.value)}
-                  placeholder="Lines"
+                  placeholder="Lines (default 200)"
                 />
                 <label className="checkbox">
                   <input

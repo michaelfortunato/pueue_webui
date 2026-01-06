@@ -91,8 +91,25 @@ header {
 
 .header-label .input {
   width: auto;
-  min-width: 84px;
+  min-width: 80px;
   padding: 6px 8px;
+}
+
+.header-advanced {
+  margin-top: 8px;
+  color: var(--ink-3);
+  font-size: 0.9rem;
+}
+
+.header-advanced summary {
+  cursor: pointer;
+}
+
+.advanced-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
 }
 
 h1 {
@@ -151,6 +168,7 @@ h1 {
 
 .failed-count {
   font-variant-numeric: tabular-nums;
+  cursor: pointer;
 }
 
 .tooltip-dot {
@@ -224,6 +242,14 @@ h1 {
   background: rgba(12, 16, 22, 0.85);
 }
 
+.pagination {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
 .table-header,
 .table-row {
   display: grid;
@@ -285,6 +311,9 @@ h1 {
 .table-row {
   border-top: 1px solid rgba(255, 255, 255, 0.05);
   align-items: start;
+  content-visibility: auto;
+  contain-intrinsic-size: 120px 1px;
+  contain: layout paint;
 }
 
 .cell.task {
