@@ -8,8 +8,8 @@ use log::warn;
 use serde_json::json;
 
 use pueue_lib::message::{
-    KillRequest, LogRequest, PauseRequest, Request, Response, RestartRequest, StartRequest,
-    TaskSelection, TaskToRestart,
+    AddRequest, KillRequest, LogRequest, PauseRequest, Request, Response, RestartRequest,
+    StartRequest, TaskSelection, TaskToRestart,
 };
 use pueue_lib::network_blocking::socket::ConnectionSettings;
 use pueue_lib::network_blocking::BlockingClient;
@@ -17,7 +17,7 @@ use pueue_lib::secret::read_shared_secret;
 use pueue_lib::settings::Settings;
 use pueue_lib::state::State;
 
-use crate::PueueBackend;
+use crate::{AddTaskRequest, PueueBackend};
 
 static CLI_FALLBACK_USED: AtomicBool = AtomicBool::new(false);
 
@@ -191,6 +191,54 @@ impl PueueBackend for RealBackend {
             Err(error) => Err(error),
         }
     }
+
+    async fn add_task(&self, request: AddTaskRequest) -> Result<serde_json::Value> {
+        let request_clone = request.clone();
+        let command = request.command.clone();
+        let group = request.group.clone().unwrap_or_else(|| "default".to_string());
+        let stashed = request.stashed.unwrap_or(false);
+        let start_immediately = request.start_immediately.unwrap_or(!stashed);
+        let path = request
+            .path
+            .clone()
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var("PUEUE_DEFAULT_TASK_PATH").ok().map(std::path::PathBuf::from))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+
+        let add = AddRequest {
+            command,
+            path,
+            envs: std::collections::HashMap::new(),
+            start_immediately,
+            stashed,
+            group,
+            enqueue_at: None,
+            dependencies: Vec::new(),
+            priority: request.priority,
+            label: request.label.clone(),
+        };
+
+        let response = self
+            .with_client(move |client| {
+                client.send_request(Request::Add(add))?;
+                match client.receive_response()? {
+                    Response::AddedTask(added) => Ok(serde_json::to_value(added)?),
+                    Response::Success(text) => Ok(json!({ "message": text })),
+                    Response::Failure(text) => bail!(text),
+                    other => bail!("Unexpected response: {:?}", other),
+                }
+            })
+            .await;
+
+        match response {
+            Ok(result) => Ok(result),
+            Err(error) if cli_fallback_enabled() => {
+                log_cli_fallback_once("add", &error.to_string());
+                run_cli_add_task(request_clone)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 fn log_map_to_json(
@@ -282,6 +330,36 @@ fn run_cli_action(task_id: usize, action: &str) -> Result<serde_json::Value> {
     };
     let id = task_id.to_string();
     let stdout = run_cli(&[command, &id])?;
+    Ok(json!({ "message": stdout }))
+}
+
+fn run_cli_add_task(request: AddTaskRequest) -> Result<serde_json::Value> {
+    let mut args = vec!["add".to_string(), request.command];
+    if let Some(group) = request.group {
+        args.push("--group".to_string());
+        args.push(group);
+    }
+    if let Some(label) = request.label {
+        args.push("--label".to_string());
+        args.push(label);
+    }
+    if let Some(priority) = request.priority {
+        args.push("--priority".to_string());
+        args.push(priority.to_string());
+    }
+    if let Some(path) = request.path {
+        args.push("--working-directory".to_string());
+        args.push(path);
+    }
+    if request.stashed.unwrap_or(false) {
+        args.push("--stashed".to_string());
+    }
+    if request.start_immediately == Some(false) {
+        args.push("--start-immediately".to_string());
+        args.push("false".to_string());
+    }
+    let refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    let stdout = run_cli(&refs)?;
     Ok(json!({ "message": stdout }))
 }
 

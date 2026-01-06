@@ -272,6 +272,44 @@ button.action:disabled {
   font-size: 0.95rem;
 }
 
+.group-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0 4px;
+}
+
+.chip {
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--ink-2);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.chip.active {
+  color: var(--accent-1);
+  border-color: rgba(39, 211, 166, 0.5);
+  background: rgba(39, 211, 166, 0.12);
+}
+
+.launch-panel {
+  margin-top: 12px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(9, 14, 13, 0.75);
+}
+
+.launch-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(140px, 1fr));
+  align-items: center;
+}
+
 .log-panel {
   margin-top: 12px;
   padding: 16px;
@@ -322,6 +360,10 @@ button.action:disabled {
   border-bottom: none;
 }
 
+.log-line-error {
+  background: rgba(255, 107, 107, 0.08);
+}
+
 .log-index {
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
@@ -368,6 +410,10 @@ button.action:disabled {
   }
 
   .toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .launch-grid {
     grid-template-columns: 1fr;
   }
 

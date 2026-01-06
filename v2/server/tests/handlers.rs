@@ -4,11 +4,12 @@ use async_trait::async_trait;
 use serde_json::json;
 use tide::http::{Method, Request as HttpRequest, Url};
 
-use pueue_webui_v2_server::{create_app, PueueBackend};
+use pueue_webui_v2_server::{create_app, AddTaskRequest, PueueBackend};
 
 #[derive(Default)]
 struct FakeBackend {
     last_action: Mutex<Option<(usize, String)>>,
+    last_add: Mutex<Option<AddTaskRequest>>,
 }
 
 #[async_trait]
@@ -30,6 +31,12 @@ impl PueueBackend for FakeBackend {
         let mut guard = self.last_action.lock().unwrap();
         *guard = Some((task_id, action.to_string()));
         Ok(json!({"message": "ok"}))
+    }
+
+    async fn add_task(&self, request: AddTaskRequest) -> anyhow::Result<serde_json::Value> {
+        let mut guard = self.last_add.lock().unwrap();
+        *guard = Some(request);
+        Ok(json!({"message": "added"}))
     }
 }
 
@@ -74,6 +81,24 @@ async fn task_action_records_action() -> tide::Result<()> {
 
     let recorded = backend.last_action.lock().unwrap().clone();
     assert_eq!(recorded, Some((3, "pause".to_string())));
+    Ok(())
+}
+
+#[async_std::test]
+async fn add_task_records_request() -> tide::Result<()> {
+    let backend = Arc::new(FakeBackend::default());
+    let app = create_app(backend.clone());
+
+    let mut req = HttpRequest::new(Method::Post, Url::parse("http://localhost/tasks")?);
+    req.set_body(json!({"command": "echo hi", "group": "default"}).to_string());
+    req.insert_header("Content-Type", "application/json");
+
+    let mut res: tide::http::Response = app.respond(req).await?;
+    let body: serde_json::Value = res.body_json().await?;
+
+    assert!(body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+    let recorded = backend.last_add.lock().unwrap().clone();
+    assert!(recorded.is_some());
     Ok(())
 }
 

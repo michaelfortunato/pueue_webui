@@ -155,6 +155,13 @@ export default function Page() {
   const [logData, setLogData] = useState<ApiLogResponse | null>(null);
   const [useLocalTime, setUseLocalTime] = useState(true);
   const [quickFilters, setQuickFilters] = useState<Set<string>>(new Set());
+  const [addCommand, setAddCommand] = useState("");
+  const [addGroup, setAddGroup] = useState("default");
+  const [addPriority, setAddPriority] = useState("");
+  const [addLabel, setAddLabel] = useState("");
+  const [addStashed, setAddStashed] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [searchInput, setSearchInput] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -265,6 +272,11 @@ export default function Page() {
       .sort((a, b) => a.group.localeCompare(b.group));
   }, [tasks]);
 
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(searchInput), 200);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
   const filteredTasks = useMemo(() => {
     const query = search.trim().toLowerCase();
     const filtered = tasks.filter((task) => {
@@ -344,6 +356,37 @@ export default function Page() {
     for (const id of ids) {
       await runTaskAction(id, action);
     }
+  }
+
+  async function addTask() {
+    setAddError(null);
+    if (!addCommand.trim()) {
+      setAddError("Command is required.");
+      return;
+    }
+    const priority = addPriority.trim() ? Number(addPriority.trim()) : undefined;
+    const body = {
+      command: addCommand.trim(),
+      group: addGroup.trim() || "default",
+      priority: Number.isFinite(priority) ? priority : undefined,
+      label: addLabel.trim() || undefined,
+      stashed: addStashed,
+      start_immediately: !addStashed,
+    };
+    const res = await fetch("/api/task", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = (await res.json()) as { ok?: boolean; error?: string } | undefined;
+    if (!json?.ok) {
+      setAddError(json?.error ?? "Failed to add task.");
+      return;
+    }
+    setAddCommand("");
+    setAddLabel("");
+    setAddPriority("");
+    await load();
   }
 
   const logText = useMemo(() => {
@@ -441,6 +484,23 @@ export default function Page() {
       </section>
 
       <h2 className="section-title">Group stats</h2>
+      <div className="group-chips">
+        <button
+          className={`chip ${groupFilter === "all" ? "active" : ""}`}
+          onClick={() => setGroupFilter("all")}
+        >
+          All groups
+        </button>
+        {groupStats.map((group) => (
+          <button
+            className={`chip ${groupFilter === group.group ? "active" : ""}`}
+            key={group.group}
+            onClick={() => setGroupFilter(group.group)}
+          >
+            {group.group} · {group.total}
+          </button>
+        ))}
+      </div>
       <div className="stats-table">
         <div className="stats-header">
           <div>Group</div>
@@ -517,7 +577,10 @@ export default function Page() {
         )}
         <div className="log-output">
           {parsedLogLines.map((line, index) => (
-            <div className="log-line" key={`${index}-${line.timestamp ?? "nots"}`}>
+            <div
+              className={`log-line${line.malformed ? " log-line-error" : ""}`}
+              key={`${index}-${line.timestamp ?? "nots"}`}
+            >
               <span className="log-index">{String(index + 1).padStart(4, "0")}</span>
               {line.timestamp && <span className="log-time">{line.timestamp}</span>}
               <span className="log-text">{line.rest}</span>
@@ -526,13 +589,52 @@ export default function Page() {
           {parsedLogLines.length === 0 && <div className="notice">No log output.</div>}
         </div>
       </div>
+      <h2 className="section-title">Launch task</h2>
+      <div className="launch-panel">
+        <div className="launch-grid">
+          <input
+            className="input"
+            placeholder="Command (required)"
+            value={addCommand}
+            onChange={(event) => setAddCommand(event.target.value)}
+          />
+          <select className="input" value={addGroup} onChange={(event) => setAddGroup(event.target.value)}>
+            {groupOptions.length === 0 && <option value="default">default</option>}
+            {groupOptions.map((group) => (
+              <option value={group} key={group}>
+                {group}
+              </option>
+            ))}
+          </select>
+          <input
+            className="input"
+            placeholder="Priority (optional)"
+            value={addPriority}
+            onChange={(event) => setAddPriority(event.target.value)}
+          />
+          <input
+            className="input"
+            placeholder="Label (optional)"
+            value={addLabel}
+            onChange={(event) => setAddLabel(event.target.value)}
+          />
+          <label className="checkbox">
+            <input type="checkbox" checked={addStashed} onChange={(event) => setAddStashed(event.target.checked)} />
+            <span>Stashed</span>
+          </label>
+          <button className="action" onClick={addTask}>
+            Add task
+          </button>
+        </div>
+        {addError && <div className="log-error">{addError}</div>}
+      </div>
       <h2 className="section-title">Tasks</h2>
       <div className="toolbar">
         <input
           className="input"
           placeholder="Search id, command, group…"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
+          value={searchInput}
+          onChange={(event) => setSearchInput(event.target.value)}
         />
         <select className="input" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
           <option value="all">All status</option>
