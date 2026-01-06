@@ -15,6 +15,7 @@ pub trait PueueBackend: Send + Sync {
     async fn logs(&self, task_id: usize, lines: Option<usize>) -> Result<serde_json::Value>;
     async fn action(&self, task_id: usize, action: &str) -> Result<serde_json::Value>;
     async fn add_task(&self, request: AddTaskRequest) -> Result<serde_json::Value>;
+    async fn group_action(&self, request: GroupActionRequest) -> Result<serde_json::Value>;
 }
 
 #[derive(Clone)]
@@ -32,6 +33,7 @@ pub fn create_app(backend: Arc<dyn PueueBackend>) -> tide::Server<AppState> {
     app.at("/status").get(status_handler);
     app.at("/logs/:id").get(logs_handler);
     app.at("/tasks").post(add_task_handler);
+    app.at("/groups").post(group_handler);
     app.at("/task/:id").post(task_action_handler);
     app
 }
@@ -172,6 +174,36 @@ async fn add_task_handler(mut req: Request<AppState>) -> tide::Result {
     }
 
     match req.state().backend.add_task(body).await {
+        Ok(result) => json_response(
+            StatusCode::Ok,
+            json!({
+                "ok": true,
+                "result": result,
+            }),
+        ),
+        Err(error) => json_response(
+            StatusCode::InternalServerError,
+            json!({
+                "ok": false,
+                "error": error.to_string(),
+            }),
+        ),
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GroupActionRequest {
+    pub action: String,
+    pub name: String,
+    pub parallel_tasks: Option<usize>,
+}
+
+async fn group_handler(mut req: Request<AppState>) -> tide::Result {
+    let body: GroupActionRequest = req.body_json().await.map_err(|_| {
+        tide::Error::from_str(StatusCode::BadRequest, "Invalid JSON body")
+    })?;
+
+    match req.state().backend.group_action(body).await {
         Ok(result) => json_response(
             StatusCode::Ok,
             json!({

@@ -8,8 +8,8 @@ use log::warn;
 use serde_json::json;
 
 use pueue_lib::message::{
-    AddRequest, KillRequest, LogRequest, PauseRequest, Request, Response, RestartRequest,
-    StartRequest, TaskSelection, TaskToRestart,
+    AddRequest, GroupRequest, KillRequest, LogRequest, PauseRequest, Request, Response,
+    RestartRequest, StartRequest, TaskSelection, TaskToRestart,
 };
 use pueue_lib::network_blocking::socket::ConnectionSettings;
 use pueue_lib::network_blocking::BlockingClient;
@@ -17,7 +17,7 @@ use pueue_lib::secret::read_shared_secret;
 use pueue_lib::settings::Settings;
 use pueue_lib::state::State;
 
-use crate::{AddTaskRequest, PueueBackend};
+use crate::{AddTaskRequest, GroupActionRequest, PueueBackend};
 
 static CLI_FALLBACK_USED: AtomicBool = AtomicBool::new(false);
 
@@ -239,6 +239,35 @@ impl PueueBackend for RealBackend {
             Err(error) => Err(error),
         }
     }
+
+    async fn group_action(&self, request: GroupActionRequest) -> Result<serde_json::Value> {
+        let name = request.name.trim().to_string();
+        if name.is_empty() {
+            bail!("Group name is required");
+        }
+        if name == "default" && request.action == "remove" {
+            bail!("Default group cannot be removed");
+        }
+
+        let action = match request.action.as_str() {
+            "add" => Request::Group(GroupRequest::Add {
+                name,
+                parallel_tasks: request.parallel_tasks,
+            }),
+            "remove" => Request::Group(GroupRequest::Remove(name)),
+            "list" => Request::Group(GroupRequest::List),
+            _ => bail!("Unsupported group action"),
+        };
+
+        match self.send_and_expect_success(action).await {
+            Ok(result) => Ok(json!({ "message": result })),
+            Err(error) if cli_fallback_enabled() => {
+                log_cli_fallback_once("group", &error.to_string());
+                run_cli_group(request)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 fn log_map_to_json(
@@ -330,6 +359,31 @@ fn run_cli_action(task_id: usize, action: &str) -> Result<serde_json::Value> {
     };
     let id = task_id.to_string();
     let stdout = run_cli(&[command, &id])?;
+    Ok(json!({ "message": stdout }))
+}
+
+fn run_cli_group(request: GroupActionRequest) -> Result<serde_json::Value> {
+    let mut args = vec!["group".to_string()];
+    match request.action.as_str() {
+        "add" => {
+            args.push("add".to_string());
+            args.push(request.name);
+            if let Some(parallel) = request.parallel_tasks {
+                args.push("--parallel".to_string());
+                args.push(parallel.to_string());
+            }
+        }
+        "remove" => {
+            args.push("remove".to_string());
+            args.push(request.name);
+        }
+        "list" => {
+            args.push("list".to_string());
+        }
+        _ => bail!("Unsupported group action"),
+    }
+    let refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    let stdout = run_cli(&refs)?;
     Ok(json!({ "message": stdout }))
 }
 

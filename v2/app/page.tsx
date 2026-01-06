@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useDeferredValue, useEffect, useMemo, useState, useTransition } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 type ApiStatusResponse = {
   ok: boolean;
@@ -26,6 +26,7 @@ type TaskRow = {
     state: "queued" | "running" | "paused" | "done" | "unknown";
     start?: string;
     end?: string;
+    enqueuedAt?: string;
     result?: string;
   };
 };
@@ -99,19 +100,28 @@ function extractTiming(status: unknown): TaskRow["timing"] {
   }
   const detail = (record[key] ?? {}) as Record<string, unknown>;
   if (key === "Queued") {
-    return { state: "queued" };
+    return { state: "queued", enqueuedAt: detail.enqueued_at as string | undefined };
   }
   if (key === "Running") {
-    return { state: "running", start: detail.start as string | undefined };
+    return {
+      state: "running",
+      start: detail.start as string | undefined,
+      enqueuedAt: detail.enqueued_at as string | undefined,
+    };
   }
   if (key === "Paused") {
-    return { state: "paused", start: detail.start as string | undefined };
+    return {
+      state: "paused",
+      start: detail.start as string | undefined,
+      enqueuedAt: detail.enqueued_at as string | undefined,
+    };
   }
   if (key === "Done") {
     return {
       state: "done",
       start: detail.start as string | undefined,
       end: detail.end as string | undefined,
+      enqueuedAt: detail.enqueued_at as string | undefined,
       result: typeof detail.result === "string" ? detail.result : undefined,
     };
   }
@@ -136,6 +146,13 @@ function formatDuration(ms?: number) {
   return `${hours}h ${minutes % 60}m`;
 }
 
+function formatTimestamp(value?: string) {
+  if (!value) return undefined;
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) return undefined;
+  return new Date(parsed).toLocaleString();
+}
+
 function taskFilterKey(task: TaskRow) {
   const timing = task.timing;
   if (!timing) return "unknown";
@@ -150,6 +167,26 @@ function canShowLogs(task: TaskRow) {
   return state === "running" || state === "paused" || state === "done";
 }
 
+const GROUP_PALETTE = [
+  "#27d3a6",
+  "#4cc3ff",
+  "#f0a93b",
+  "#ff8f7a",
+  "#b58bff",
+  "#7bd88f",
+  "#f06292",
+];
+
+function groupColor(name: string | undefined) {
+  const key = (name ?? "default").toLowerCase();
+  if (key === "default") return "#27d3a6";
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  return GROUP_PALETTE[hash % GROUP_PALETTE.length];
+}
+
 export default function Page() {
   const [data, setData] = useState<ApiStatusResponse>({ ok: true });
   const [loading, setLoading] = useState(true);
@@ -159,7 +196,7 @@ export default function Page() {
   const [groupFilter, setGroupFilter] = useState("all");
   const [sortBy, setSortBy] = useState("id-asc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [logTaskId, setLogTaskId] = useState("1");
+  const [logTaskId, setLogTaskId] = useState("");
   const [logLines, setLogLines] = useState("200");
   const [logData, setLogData] = useState<ApiLogResponse | null>(null);
   const [useLocalTime, setUseLocalTime] = useState(true);
@@ -173,6 +210,24 @@ export default function Page() {
   const [searchInput, setSearchInput] = useState("");
   const [isPending, startTransition] = useTransition();
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [groupName, setGroupName] = useState("");
+  const [groupParallel, setGroupParallel] = useState("");
+  const [groupError, setGroupError] = useState<string | null>(null);
+  const [showAddGroupRow, setShowAddGroupRow] = useState(false);
+  const [isLogModalOpen, setIsLogModalOpen] = useState(false);
+  const logSectionRef = useRef<HTMLDivElement | null>(null);
+
+  const openLogModal = useCallback(() => {
+    setIsLogModalOpen(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isLogModalOpen) return;
+    const timer = setTimeout(() => {
+      logSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [isLogModalOpen]);
 
   const load = useCallback(async () => {
     try {
@@ -235,6 +290,13 @@ export default function Page() {
     const queued = tasks.filter((task) => task.status.toLowerCase().includes("queued")).length;
     const failed = tasks.filter((task) => task.status.toLowerCase().includes("failed")).length;
     return { total, running, queued, failed };
+  }, [tasks]);
+
+  const failedIds = useMemo(() => {
+    const ids = tasks
+      .filter((task) => task.status.toLowerCase().includes("failed"))
+      .map((task) => task.id);
+    return ids.sort((a, b) => Number(a) - Number(b));
   }, [tasks]);
 
   const groupStats = useMemo(() => {
@@ -304,10 +366,17 @@ export default function Page() {
           entry.durations.length > 0
             ? entry.durations.reduce((sum, value) => sum + value, 0) / entry.durations.length
             : undefined;
+        const variance =
+          entry.durations.length > 1 && avgMs !== undefined
+            ? entry.durations.reduce((sum, value) => sum + (value - avgMs) ** 2, 0) /
+              (entry.durations.length - 1)
+            : undefined;
+        const stddevMs = variance !== undefined ? Math.sqrt(variance) : undefined;
         return {
           group,
           ...entry,
           avgDuration: formatDuration(avgMs),
+          stddevDuration: formatDuration(stddevMs),
         };
       })
       .sort((a, b) => {
@@ -446,6 +515,34 @@ export default function Page() {
     await load();
   }
 
+  async function addGroupAction() {
+    setGroupError(null);
+    if (!groupName.trim()) {
+      setGroupError("Group name is required.");
+      return;
+    }
+    const parallel = groupParallel.trim() ? Number(groupParallel.trim()) : undefined;
+    const body = {
+      action: "add",
+      name: groupName.trim(),
+      parallel_tasks: Number.isFinite(parallel) ? parallel : undefined,
+    };
+    const res = await fetch("/api/groups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = (await res.json()) as { ok?: boolean; error?: string } | undefined;
+    if (!json?.ok) {
+      setGroupError(json?.error ?? "Failed to add group.");
+      return;
+    }
+    setGroupName("");
+    setGroupParallel("");
+    await load();
+  }
+
+
   const logText = useMemo(() => {
     if (!logData?.log) return "";
     const log = logData.log;
@@ -490,6 +587,14 @@ export default function Page() {
     const json = (await res.json()) as ApiLogResponse;
     setLogData(json);
   }
+
+  useEffect(() => {
+    if (!logTaskId) return;
+    const timer = setTimeout(() => {
+      void loadLogs();
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [logTaskId, logLines]);
 
   return (
     <main>
@@ -536,219 +641,227 @@ export default function Page() {
         </div>
         <div className="card">
           <h3>Failed</h3>
-          <p>{counts.failed}</p>
+          <p>
+            {counts.failed}
+            {counts.failed > 1 && (
+              <span className="tooltip-anchor" role="button" tabIndex={0}>
+                <span className="tooltip-dot" />
+                <span className="tooltip">
+                  <strong>Failed task IDs</strong>
+                  <div className="tooltip-list">
+                    {failedIds.slice(0, 4).map((id) => (
+                      <span className="tooltip-item" key={id}>
+                        {id}
+                      </span>
+                    ))}
+                    {counts.failed > failedIds.length && (
+                      <span className="tooltip-item tooltip-muted">
+                        {counts.failed - failedIds.length} unknown (not in list)
+                      </span>
+                    )}
+                    {failedIds.length > 4 && <span className="tooltip-item">…</span>}
+                  </div>
+                </span>
+              </span>
+            )}
+          </p>
         </div>
       </section>
 
-      <h2 className="section-title">Group stats</h2>
-      <div className="group-chips">
-        <button
-          className={`chip ${groupFilter === "all" ? "active" : ""}`}
-          onClick={() => startTransition(() => setGroupFilter("all"))}
-        >
-          All groups
-        </button>
-        {groupStats.map((group) => (
+      <section className="section-block">
+        <div className="section-head">
+          <h2 className="section-title">Groups</h2>
+          <p className="section-note">Default stays pinned first. Click a chip to filter the task list.</p>
+          <div className="section-actions">
+            <button className="action" onClick={() => setShowAddGroupRow((prev) => !prev)}>
+              {showAddGroupRow ? "Hide add group" : "Add group"}
+            </button>
+          </div>
+        </div>
+        <div className="group-chips">
           <button
-            className={`chip ${groupFilter === group.group ? "active" : ""}`}
-            key={group.group}
-            onClick={() => startTransition(() => setGroupFilter(group.group))}
+            className={`chip ${groupFilter === "all" ? "active" : ""}`}
+            onClick={() => startTransition(() => setGroupFilter("all"))}
           >
-            {group.group} · {group.total}
+            All groups
           </button>
-        ))}
-      </div>
-      <div className="stats-table">
-        <div className="stats-header">
-          <div>Group</div>
-          <div>Total</div>
-          <div>Running</div>
-          <div>Queued</div>
-          <div>Paused</div>
-          <div>Done</div>
-          <div>Success</div>
-          <div>Failed</div>
-          <div>Avg duration</div>
-        </div>
-        {groupStats.map((group) => (
-          <div className="stats-row" key={group.group}>
-            <div>{group.group}</div>
-            <div>{group.total}</div>
-            <div>{group.running}</div>
-            <div>{group.queued}</div>
-            <div>{group.paused}</div>
-            <div>{group.done}</div>
-            <div>{group.success}</div>
-            <div>{group.failed}</div>
-            <div>{group.avgDuration}</div>
-          </div>
-        ))}
-        {groupStats.length === 0 && (
-          <div className="stats-row">
-            <div>default</div>
-            <div>0</div>
-            <div>0</div>
-            <div>0</div>
-            <div>0</div>
-            <div>0</div>
-            <div>0</div>
-            <div>0</div>
-            <div>—</div>
-          </div>
-        )}
-      </div>
-      <h2 className="section-title">Log preview</h2>
-      <div className="log-panel">
-        <div className="log-controls">
-          <input
-            className="input"
-            value={logTaskId}
-            onChange={(event) => setLogTaskId(event.target.value)}
-            placeholder="Task id"
-          />
-          <input
-            className="input"
-            value={logLines}
-            onChange={(event) => setLogLines(event.target.value)}
-            placeholder="Lines"
-          />
-          <button className="action" onClick={loadLogs}>
-            Load logs
-          </button>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={useLocalTime}
-              onChange={(event) => setUseLocalTime(event.target.checked)}
-            />
-            <span>Local time</span>
-          </label>
-          <span className="notice">
-            {logData?.ok === false ? `Log error: ${logData.error ?? "Unknown"}` : " "}
-          </span>
-        </div>
-        {hasMalformedLogs && (
-          <div className="log-error">
-            Malformed timestamp detected. Log parsing failed for at least one entry.
-          </div>
-        )}
-        <div className="log-output">
-          {parsedLogLines.map((line, index) => (
-            <div
-              className={`log-line${line.malformed ? " log-line-error" : ""}`}
-              key={`${index}-${line.timestamp ?? "nots"}`}
+          {groupStats.map((group) => (
+            <button
+              className={`chip ${groupFilter === group.group ? "active" : ""}`}
+              key={group.group}
+              onClick={() => startTransition(() => setGroupFilter(group.group))}
+              title={`${group.group} (${group.total})`}
             >
-              <span className="log-index">{String(index + 1).padStart(4, "0")}</span>
-              {line.timestamp && <span className="log-time">{line.timestamp}</span>}
-              <span className="log-text">{line.rest}</span>
+              <span className="chip-label">{group.group}</span>
+              <span className="chip-count">{group.total}</span>
+            </button>
+          ))}
+        </div>
+        <div className="stats-table">
+          <div className="stats-header">
+            <div>Group</div>
+            <div>Total</div>
+            <div>Running</div>
+            <div>Queued</div>
+            <div>Paused</div>
+            <div>Done</div>
+            <div>Success</div>
+            <div>Failed</div>
+            <div>Avg duration</div>
+            <div></div>
+          </div>
+          {groupStats.map((group) => (
+            <div className="stats-row" key={group.group}>
+              <div className="truncate" title={group.group}>
+                <span className="group-pill" style={{ "--group-color": groupColor(group.group) } as React.CSSProperties}>
+                  {group.group}
+                </span>
+              </div>
+              <div>{group.total}</div>
+              <div>{group.running}</div>
+              <div>{group.queued}</div>
+              <div>{group.paused}</div>
+              <div>{group.done}</div>
+              <div>{group.success}</div>
+              <div>{group.failed}</div>
+              <div>
+                {group.avgDuration} ± {group.stddevDuration}
+              </div>
+              <div className="group-row-action">
+                {group.group !== "default" && (
+                  <button
+                    className="icon-button"
+                    title={`Remove group ${group.group}`}
+                    onClick={() => {
+                      if (!window.confirm(`Remove group "${group.group}"?`)) return;
+                      setGroupError(null);
+                      const name = group.group;
+                      void (async () => {
+                        const body = { action: "remove", name };
+                        const res = await fetch("/api/groups", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify(body),
+                        });
+                        const json = (await res.json()) as { ok?: boolean; error?: string } | undefined;
+                        if (!json?.ok) {
+                          setGroupError(json?.error ?? "Failed to remove group.");
+                          return;
+                        }
+                        await load();
+                      })();
+                    }}
+                  >
+                    🗑
+                  </button>
+                )}
+              </div>
             </div>
           ))}
-          {parsedLogLines.length === 0 && <div className="notice">No log output.</div>}
-        </div>
-      </div>
-      <h2 className="section-title">Task detail</h2>
-      <div className="detail-panel">
-        {selectedTask ? (
-          <>
-            <div className="detail-header">
-              <div>
-                <div className="badge">Task #{selectedTask.id}</div>
-                <h3>{selectedTask.command || "(no command)"}</h3>
-                <p className="notice">
-                  {selectedTask.group ?? "default"} · {selectedTask.status}
-                  {selectedTask.label ? ` · ${selectedTask.label}` : ""}
-                </p>
-              </div>
-              <div className="actions">
-                <button
-                  className="action"
-                  onClick={() => {
-                    setLogTaskId(selectedTask.id);
-                    loadLogs();
-                  }}
-                >
-                  View logs
+          {groupStats.length === 0 && (
+            <div className="stats-row">
+              <div>default</div>
+              <div>0</div>
+              <div>0</div>
+              <div>0</div>
+              <div>0</div>
+              <div>0</div>
+              <div>0</div>
+              <div>0</div>
+              <div>—</div>
+              <div className="group-row-action">—</div>
+            </div>
+          )}
+          {showAddGroupRow && (
+            <div className="stats-row stats-row-editor">
+              <div className="stats-editor">
+                <input
+                  className="input"
+                  placeholder="Group name"
+                  value={groupName}
+                  onChange={(event) => setGroupName(event.target.value)}
+                />
+                <input
+                  className="input"
+                  placeholder="Parallel tasks (optional)"
+                  value={groupParallel}
+                  onChange={(event) => setGroupParallel(event.target.value)}
+                />
+                <button className="action" onClick={addGroupAction}>
+                  Add group
                 </button>
               </div>
+              {groupError && <div className="log-error">{groupError}</div>}
             </div>
-            <div className="detail-grid">
-              <div className="card">
-                <h3>Status</h3>
-                <p>{selectedTask.status}</p>
-              </div>
-              <div className="card">
-                <h3>Group</h3>
-                <p>{selectedTask.group ?? "default"}</p>
-              </div>
-              <div className="card">
-                <h3>Duration</h3>
-                <p>{selectedDuration}</p>
-              </div>
-              <div className="card">
-                <h3>Priority</h3>
-                <p>{selectedTask.priority ?? "—"}</p>
-              </div>
-            </div>
-            <div className="detail-meta">
-              <div>
-                <strong>Path</strong>
-                <div>{selectedTask.path ?? "—"}</div>
-              </div>
-              <div>
-                <strong>Result</strong>
-                <div>{selectedTask.timing?.result ?? "—"}</div>
-              </div>
-              <div>
-                <strong>Label</strong>
-                <div>{selectedTask.label ?? "—"}</div>
-              </div>
-            </div>
-          </>
-        ) : (
-          <p className="notice">Select a task to see details.</p>
-        )}
-      </div>
-      <h2 className="section-title">Launch task</h2>
-      <div className="launch-panel">
-        <div className="launch-grid">
-          <input
-            className="input"
-            placeholder="Command (required)"
-            value={addCommand}
-            onChange={(event) => setAddCommand(event.target.value)}
-          />
-          <select className="input" value={addGroup} onChange={(event) => setAddGroup(event.target.value)}>
-            {groupOptions.length === 0 && <option value="default">default</option>}
-            {groupOptions.map((group) => (
-              <option value={group} key={group}>
-                {group}
-              </option>
-            ))}
-          </select>
-          <input
-            className="input"
-            placeholder="Priority (optional)"
-            value={addPriority}
-            onChange={(event) => setAddPriority(event.target.value)}
-          />
-          <input
-            className="input"
-            placeholder="Label (optional)"
-            value={addLabel}
-            onChange={(event) => setAddLabel(event.target.value)}
-          />
-          <label className="checkbox">
-            <input type="checkbox" checked={addStashed} onChange={(event) => setAddStashed(event.target.checked)} />
-            <span>Stashed</span>
-          </label>
-          <button className="action" onClick={addTask}>
-            Add task
-          </button>
+          )}
         </div>
-        {addError && <div className="log-error">{addError}</div>}
-      </div>
-      <h2 className="section-title">Tasks</h2>
-      <div className="toolbar">
+      </section>
+
+      <section className="section-block">
+        <div className="section-head">
+          <h2 className="section-title">Log preview</h2>
+          <p className="section-note">Preview logs here, or open the full viewer in a modal.</p>
+        </div>
+        <div className="launch-panel">
+          <div className="log-controls">
+            <input
+              className="input"
+              value={logTaskId}
+              onChange={(event) => setLogTaskId(event.target.value)}
+              placeholder="Task id"
+            />
+            <input
+              className="input"
+              value={logLines}
+              onChange={(event) => setLogLines(event.target.value)}
+              placeholder="Lines"
+            />
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={useLocalTime}
+                onChange={(event) => setUseLocalTime(event.target.checked)}
+              />
+              <span>Local time</span>
+            </label>
+            <button className="action" onClick={() => setIsLogModalOpen(true)}>
+              Open full viewer
+            </button>
+            <span className="notice">
+              {logData?.ok === false ? `Log error: ${logData.error ?? "Unknown"}` : " "}
+            </span>
+          </div>
+          {hasMalformedLogs && (
+            <div className="log-error">
+              Malformed timestamp detected. Log parsing failed for at least one entry.
+            </div>
+          )}
+          <div className="log-output log-preview-output">
+            {parsedLogLines.slice(0, 12).map((line, index) => (
+              <div
+                className={`log-line${line.malformed ? " log-line-error" : ""}`}
+                key={`${index}-${line.timestamp ?? "nots"}`}
+              >
+                <span className="log-index">{String(index + 1).padStart(4, "0")}</span>
+                {line.timestamp && <span className="log-time">{line.timestamp}</span>}
+                <span className="log-text">{line.rest}</span>
+              </div>
+            ))}
+            {parsedLogLines.length === 0 && (
+              <div className="notice">
+                {logTaskId ? "No log output loaded yet." : "Pick a task to load logs."}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="section-block">
+        <div className="section-head">
+          <h2 className="section-title">Tasks</h2>
+          <p className="section-note">Click a row to focus it and sync the detail + log viewer.</p>
+        </div>
+        <div className="toolbar">
         <input
           className="input"
           placeholder="Search id, command, group…"
@@ -825,11 +938,11 @@ export default function Page() {
         </div>
         <div className="batch-actions">
           {[
-            ["start", "Start"],
-            ["pause", "Pause"],
+            ["start", "Start ▶︎"],
+            ["pause", "Pause ⏸"],
             ["resume", "Resume"],
             ["restart", "Restart"],
-            ["kill", "Kill"],
+            ["kill", "Stop ⏹"],
             ["remove", "Remove"],
           ].map(([action, label]) => (
             <button
@@ -843,25 +956,36 @@ export default function Page() {
           ))}
         </div>
       </div>
-      <div className="table">
-        <div className="table-header">
-          <div>
-            <label className="checkbox">
-              <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
-              <span>Select</span>
-            </label>
-          </div>
-          <div>ID</div>
-          <div>Status</div>
-          <div>Command</div>
-          <div>Group</div>
-          <div>Logs</div>
-          <div>Actions</div>
-        </div>
-        {filteredTasks.map((task) => (
-          <div className="table-row" key={task.id}>
-            <div>
+        <div className="table">
+          <div className="table-header">
+            <div className="cell select">
               <label className="checkbox">
+                <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+                <span>Select</span>
+              </label>
+            </div>
+            <div className="cell id">ID</div>
+            <div className="cell status">Status</div>
+            <div className="cell command">Command</div>
+            <div className="cell group">Group</div>
+            <div className="cell logs">Logs</div>
+            <div className="cell actions">Actions</div>
+          </div>
+          {filteredTasks.map((task) => (
+            <div
+              className={`table-row clickable${selectedTaskId === task.id ? " active" : ""}`}
+              key={task.id}
+              onClick={(event) => {
+                const target = event.target as HTMLElement;
+                if (target.closest("button, input, select, textarea, label, a")) {
+                  return;
+                }
+                setSelectedTaskId(task.id);
+                setLogTaskId(task.id);
+              }}
+            >
+              <div className="cell select">
+              <label className="checkbox" onClick={(event) => event.stopPropagation()}>
                 <input
                   type="checkbox"
                   checked={selectedIds.has(task.id)}
@@ -869,73 +993,314 @@ export default function Page() {
                 />
                 <span>Pick</span>
               </label>
-            </div>
-            <div>{task.id}</div>
-            <div>
-              <span className={`status-pill ${statusTone(task.status)}`}>{task.status}</span>
-            </div>
-            <div>{task.command || "(no command)"}</div>
-            <div>{task.group ?? "default"}</div>
-            <div>
-              <button
-                className="action"
-                disabled={!canShowLogs(task)}
-                onClick={() => {
-                  setLogTaskId(task.id);
-                  loadLogs();
-                }}
-              >
-                Logs
-              </button>
-            </div>
-            <div className="actions">
-              {[
-                ["start", "Start"],
-                ["pause", "Pause"],
-                ["resume", "Resume"],
-                ["restart", "Restart"],
-                ["kill", "Kill"],
-                ["remove", "Remove"],
-              ].map(([action, label]) => {
-                const disabled = pendingActions.has(`${task.id}:${action}`);
-                return (
+              </div>
+              <div className="cell id">{task.id}</div>
+              <div className="cell status">
+                <span className={`status-pill ${statusTone(task.status)}`}>{task.status}</span>
+                {task.timing?.start && (
+                  <div className="status-meta">
+                    Started {formatTimestamp(task.timing.start)}
+                  </div>
+                )}
+                {task.timing?.end && (
+                  <div className="status-meta">
+                    Ended {formatTimestamp(task.timing.end)}
+                  </div>
+                )}
+                {task.timing?.state === "done" && (
+                  <div className="status-meta">
+                    Duration {formatDuration(durationMs(task.timing.start, task.timing.end))}
+                  </div>
+                )}
+              </div>
+              <div className="cell command">
+                <div className="command-wrap">
+                  <div className="command-text" title={task.command}>
+                    {task.command || "(no command)"}
+                  </div>
                   <button
-                    className="action"
-                    key={action}
-                    disabled={disabled}
-                    onClick={() => runTaskAction(task.id, action)}
+                    className="command-copy"
+                    title="Copy command"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const text = task.command || "";
+                      if (!text) return;
+                      if (navigator?.clipboard?.writeText) {
+                        void navigator.clipboard.writeText(text);
+                        return;
+                      }
+                      const el = document.createElement("textarea");
+                      el.value = text;
+                      el.style.position = "fixed";
+                      el.style.opacity = "0";
+                      document.body.appendChild(el);
+                      el.select();
+                      document.execCommand("copy");
+                      document.body.removeChild(el);
+                    }}
                   >
-                    {disabled ? "Working…" : label}
+                    Copy
                   </button>
-                );
-              })}
-              <button className="action" onClick={() => setSelectedTaskId(task.id)}>
-                Details
-              </button>
+                </div>
+              </div>
+              <div className="cell group">
+                <span
+                  className="group-pill"
+                  title={task.group ?? "default"}
+                  style={{ "--group-color": groupColor(task.group) } as React.CSSProperties}
+                >
+                  {task.group ?? "default"}
+                </span>
+              </div>
+              <div className="cell logs">
+                <button
+                  className="action"
+                  disabled={!canShowLogs(task)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setLogTaskId(task.id);
+                    openLogModal();
+                  }}
+                >
+                  Logs
+                </button>
+              </div>
+              <div className="cell actions actions">
+                {[
+                  ["start", "Start ▶︎"],
+                  ["pause", "Pause ⏸"],
+                  ["resume", "Resume"],
+                  ["restart", "Restart"],
+                  ["kill", "Stop ⏹"],
+                  ["remove", "Remove"],
+                ].map(([action, label]) => {
+                  const disabled = pendingActions.has(`${task.id}:${action}`);
+                  return (
+                    <button
+                      className="action"
+                      key={action}
+                      disabled={disabled}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void runTaskAction(task.id, action);
+                      }}
+                    >
+                      {disabled ? "Working…" : label}
+                    </button>
+                  );
+                })}
+                <button
+                  className="action"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setSelectedTaskId(task.id);
+                    setLogTaskId(task.id);
+                  }}
+                >
+                  Details
+                </button>
+              </div>
             </div>
-          </div>
         ))}
         {filteredTasks.length === 0 && (
           <div className="table-row">
-            <div>—</div>
-            <div>
+            <div className="cell select">—</div>
+            <div className="cell id">—</div>
+            <div className="cell status">
               <span className="status-pill">No tasks</span>
             </div>
-            <div>Launch a task with pueue add</div>
-            <div>default</div>
-            <div>
+            <div className="cell command">Launch a task with pueue add</div>
+            <div className="cell group">default</div>
+            <div className="cell logs">
               <button className="action" disabled>
                 Logs
               </button>
             </div>
-            <div className="actions">
+            <div className="cell actions actions">
               <button className="action" disabled>
                 Awaiting tasks
               </button>
             </div>
           </div>
         )}
-      </div>
+        </div>
+      </section>
+
+      <section className="section-block">
+        <div className="section-head">
+          <h2 className="section-title">Task detail</h2>
+          <p className="section-note">Focus a task row to update this panel.</p>
+        </div>
+        <div className="detail-panel">
+          {selectedTask ? (
+            <>
+            <div className="detail-header">
+              <div>
+                <div className="badge">Task #{selectedTask.id}</div>
+                <h3>{selectedTask.command || "(no command)"}</h3>
+                <p className="notice">
+                  {selectedTask.group ?? "default"} · {selectedTask.status}
+                  {selectedTask.label ? ` · ${selectedTask.label}` : ""}
+                </p>
+              </div>
+              <div className="actions">
+                <button
+                  className="action"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setLogTaskId(selectedTask.id);
+                    openLogModal();
+                  }}
+                >
+                  View logs
+                </button>
+              </div>
+            </div>
+            <div className="detail-grid">
+              <div className="card">
+                <h3>Status</h3>
+                <p>{selectedTask.status}</p>
+              </div>
+              <div className="card">
+                <h3>Group</h3>
+                <p>{selectedTask.group ?? "default"}</p>
+              </div>
+              <div className="card">
+                <h3>Duration</h3>
+                <p>{selectedDuration}</p>
+              </div>
+              <div className="card">
+                <h3>Priority</h3>
+                <p>{selectedTask.priority ?? "—"}</p>
+              </div>
+            </div>
+            <div className="detail-meta">
+              <div>
+                <strong>Path</strong>
+                <div>{selectedTask.path ?? "—"}</div>
+              </div>
+              <div>
+                <strong>Result</strong>
+                <div>{selectedTask.timing?.result ?? "—"}</div>
+              </div>
+              <div>
+                <strong>Label</strong>
+                <div>{selectedTask.label ?? "—"}</div>
+              </div>
+            </div>
+            </>
+          ) : (
+            <p className="notice">Select a task to see details.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="section-block">
+        <div className="section-head">
+          <h2 className="section-title">Launch task</h2>
+          <p className="section-note">Submit a new command to the queue.</p>
+        </div>
+        <div className="launch-panel">
+          <div className="launch-grid">
+          <input
+            className="input"
+            placeholder="Command (required)"
+            value={addCommand}
+            onChange={(event) => setAddCommand(event.target.value)}
+          />
+          <select className="input" value={addGroup} onChange={(event) => setAddGroup(event.target.value)}>
+            {groupOptions.length === 0 && <option value="default">default</option>}
+            {groupOptions.map((group) => (
+              <option value={group} key={group}>
+                {group}
+              </option>
+            ))}
+          </select>
+          <input
+            className="input"
+            placeholder="Priority (optional)"
+            value={addPriority}
+            onChange={(event) => setAddPriority(event.target.value)}
+          />
+          <input
+            className="input"
+            placeholder="Label (optional)"
+            value={addLabel}
+            onChange={(event) => setAddLabel(event.target.value)}
+          />
+          <label className="checkbox">
+            <input type="checkbox" checked={addStashed} onChange={(event) => setAddStashed(event.target.checked)} />
+            <span>Stashed</span>
+          </label>
+          <button className="action" onClick={addTask}>
+            Add task
+          </button>
+        </div>
+          {addError && <div className="log-error">{addError}</div>}
+        </div>
+      </section>
+
+      {isLogModalOpen && (
+        <div className="log-modal" role="dialog" aria-modal="true">
+          <div className="log-modal-backdrop" onClick={() => setIsLogModalOpen(false)} />
+          <div className="log-modal-content" ref={logSectionRef}>
+            <div className="log-modal-header">
+              <div>
+                <h2 className="section-title">Log viewer</h2>
+                <p className="section-note">Running, paused, and completed tasks support logs.</p>
+              </div>
+              <button className="action" onClick={() => setIsLogModalOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="log-panel">
+              <div className="log-controls">
+                <input
+                  className="input"
+                  value={logTaskId}
+                  onChange={(event) => setLogTaskId(event.target.value)}
+                  placeholder="Task id"
+                />
+                <input
+                  className="input"
+                  value={logLines}
+                  onChange={(event) => setLogLines(event.target.value)}
+                  placeholder="Lines"
+                />
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={useLocalTime}
+                    onChange={(event) => setUseLocalTime(event.target.checked)}
+                  />
+                  <span>Local time</span>
+                </label>
+                <span className="notice">
+                  {logData?.ok === false ? `Log error: ${logData.error ?? "Unknown"}` : " "}
+                </span>
+              </div>
+              {hasMalformedLogs && (
+                <div className="log-error">
+                  Malformed timestamp detected. Log parsing failed for at least one entry.
+                </div>
+              )}
+              <div className="log-output">
+                {parsedLogLines.map((line, index) => (
+                  <div
+                    className={`log-line${line.malformed ? " log-line-error" : ""}`}
+                    key={`${index}-${line.timestamp ?? "nots"}`}
+                  >
+                    <span className="log-index">{String(index + 1).padStart(4, "0")}</span>
+                    {line.timestamp && <span className="log-time">{line.timestamp}</span>}
+                    <span className="log-text">{line.rest}</span>
+                  </div>
+                ))}
+                {parsedLogLines.length === 0 && <div className="notice">No log output.</div>}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
