@@ -714,6 +714,13 @@ export default function Page() {
     taskCacheRef.current = cache;
     return rows;
   }, [data.status]);
+
+  useEffect(() => {
+    if (logTaskId) return;
+    if (tasks.some((task) => task.id === "0")) {
+      setLogTaskId("0");
+    }
+  }, [logTaskId, tasks]);
   const deferredSearch = useDeferredValue(search);
   const deferredStatus = useDeferredValue(statusFilter);
   const deferredGroupFilters = useDeferredValue(groupFilters);

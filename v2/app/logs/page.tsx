@@ -49,7 +49,7 @@ export default function LogsPage() {
     if (!taskId) return [];
     return logText.split(/\r?\n/).map((line) => {
       const match = line.match(
-        /^(\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?)\\s*(.*)$/
+        /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s*(.*)$/
       );
       if (!match) {
         return { timestamp: null, rest: line, malformed: false };
