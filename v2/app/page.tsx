@@ -365,7 +365,7 @@ const TaskRowView = memo(
   }: TaskRowProps) {
     return (
       <div
-        className={`table-row clickable${isActive ? " active" : ""}`}
+        className={`table-row clickable${isActive ? " active" : ""}${isMenuOpen ? " menu-open" : ""}`}
         onClick={(event) => {
           const target = event.target as HTMLElement;
           if (target.closest("button, input, select, textarea, label, a")) {
@@ -589,6 +589,18 @@ export default function Page() {
       logSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 0);
     return () => clearTimeout(timer);
+  }, [isLogModalOpen]);
+
+  useEffect(() => {
+    if (!isLogModalOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setIsLogModalOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, [isLogModalOpen]);
 
   const load = useCallback(async () => {
@@ -927,7 +939,7 @@ export default function Page() {
       const key = task.filterKey;
       if (key === "running") running += 1;
       if (key === "queued") queued += 1;
-      if (key === "done" || key === "failed") completed += 1;
+      if (key === "done") completed += 1;
       if (isFailedTask(task)) {
         failed += 1;
         ids.push(task.id);

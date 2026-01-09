@@ -331,6 +331,12 @@ h1 {
   content-visibility: auto;
   contain-intrinsic-size: 140px 1px;
   contain: layout paint;
+  position: relative;
+}
+
+.table-row.menu-open {
+  z-index: 20;
+  contain: layout;
 }
 
 .cell.task {
@@ -1007,7 +1013,7 @@ button.action.mini {
   position: absolute;
   right: 0;
   top: calc(100% + 6px);
-  z-index: 5;
+  z-index: 60;
   display: grid;
   gap: 6px;
   min-width: 160px;
