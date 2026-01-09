@@ -1,11 +1,13 @@
 # Pueue-lib
 
-[![Test Build](https://github.com/Nukesor/pueue/actions/workflows/test.yml/badge.svg)](https://github.com/Nukesor/pueue/actions/workflows/test.yml)
-[![Crates.io](https://img.shields.io/crates/v/pueue-lib)](https://crates.io/crates/pueue-lib)
-[![docs](https://docs.rs/pueue-lib/badge.svg)](https://docs.rs/pueue-lib/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<!-- [![Test Build](https://github.com/Nukesor/pueue/actions/workflows/test.yml/badge.svg)](https://github.com/Nukesor/pueue/actions/workflows/test.yml) -->
+<!-- [![Crates.io](https://img.shields.io/crates/v/pueue-lib)](https://crates.io/crates/pueue-lib) -->
+<!-- [![docs](https://docs.rs/pueue-lib/badge.svg)](https://docs.rs/pueue-lib/) -->
+<!-- [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) -->
 
-This is the shared library used by the [Pueue](https://github.com/nukesor/pueue/) client and daemon.
+WARNING: This project is completely unofficial and not affiliated with actual pueue
+
+<!-- This hopes shared library used by the [Pueue](https://github.com/nukesor/pueue/) client and daemon. -->
 
 It contains everything you need to communicate with the daemon:
 
